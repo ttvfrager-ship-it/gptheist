@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AGENTS, EXECUTION_MODE, ensureSafeAuditDirectory, runSimulation, sanitizeTerminal, validateFixture, writeJsonlLog, type ReplayFixture, type SimulationResult } from "./simulation.js";
+import { PaperStore } from "./paper-store.js";
 import { startDeskServer } from "./server.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -48,6 +49,13 @@ async function runFixture(path: string): Promise<void> {
 
 async function main(args: string[]): Promise<void> {
   const command = args[0] ?? "help";
+  if (command === "paper-reset") {
+    if (args[1] !== "--confirm-paper-reset") throw new Error("Stop the Desk, then use paper-reset --confirm-paper-reset (PAPER data only; backup retained)");
+    const store = await PaperStore.open(resolve(process.cwd(), "runs/paper"));
+    try { await store.reset(); } finally { await store.close(); }
+    process.stdout.write("PAPER account reset to $1,000. Prior PAPER state backed up. Research data unchanged.\n");
+    return;
+  }
   if (command === "demo") {
     await runFixture(resolve(projectRoot, "fixtures/success.json"));
     return;
@@ -76,6 +84,7 @@ async function main(args: string[]): Promise<void> {
     if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) throw new Error("--port must be an integer from 0 to 65535");
     const rpcUrl = process.env.RPC_URL;
     const server = await startDeskServer(rpcUrl ? { host, port, rpcUrl } : { host, port });
+    for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => { server.close(); server.closeIdleConnections(); });
     const address = server.address();
     const boundPort = typeof address === "object" && address !== null ? address.port : port;
     process.stdout.write(`GPTHEIST DESK — read-only Robinhood Chain watch\nhttp://${sanitizeTerminal(host)}:${boundPort}\nNo wallet. No signing. No live execution.\n`);
@@ -129,6 +138,7 @@ async function main(args: string[]): Promise<void> {
       "  gptheist agents",
       "  gptheist desk [--host 127.0.0.1] [--port 4173]",
       "  gptheist doctor",
+      "  gptheist paper-reset --confirm-paper-reset",
       "",
       "Desk: read-only Robinhood Chain launch feed; no wallet or execution.",
       "Replay: deterministic paper-only simulation.",

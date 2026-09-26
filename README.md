@@ -18,7 +18,7 @@
 
 GPTHEIST is a read-only Robinhood Chain launch desk plus a deterministic market-replay CLI inspired by the ten-agent operating system described by [@immortalhowwl](https://x.com/immortalhowwl). Every Pons factory launch crosses ten visible evidence stages. Palermo vetoes unsupported action; Professor never sends an order.
 
-The live Desk reads public chain data only. It has **no wallet connection, private key, signing, brokerage integration, or order execution path**. Raw launch events do not prove liquidity, price quality, slippage, or social quality, so the live trade gate fails closed.
+The live Desk reads public chain data only. It has **no wallet connection, private key, signing, brokerage integration, or order execution path**. Raw launch events alone do not authorize a paper trade: a completed WATCH must also pass fresh quote and paper risk checks.
 
 <p align="center">
   <img src="./assets/desk.png" alt="GPTHEIST Desk showing live Robinhood Chain launches and a Palermo veto" width="100%">
@@ -161,3 +161,63 @@ Never put secrets or private keys into fixtures. This project has no live execut
 ## License
 
 MIT © [@immortalhowwl](https://x.com/immortalhowwl)
+
+## Paper trading desk
+
+Start with `npm run desk`, then open **http://127.0.0.1:4173/paper**. The original Desk and Target Dossier remain at `/`; TRACE, CREW, METHOD and VAULT retain their routes. The PAPER page is labeled **PAPER MODE / SIMULATED EXECUTION / NO REAL MONEY**. No wallet, private key or seed phrase is required. This feature cannot sign, broadcast, swap, or place real orders.
+
+The virtual account starts at **$1,000 USD**. Experimental defaults are centralized in `src/paper.ts`:
+
+| Setting | Default |
+|---|---:|
+| STARTING_BALANCE_USD | 1000 |
+| MAX_POSITION_USD | 10 |
+| MAX_OPEN_POSITIONS | 5 |
+| STOP_LOSS_PERCENT | -10 |
+| TAKE_PROFIT_PERCENT | 20 |
+| MAX_DAILY_LOSS_USD | 50 |
+| QUOTE_MAX_AGE_MS | 30000 |
+| MONITOR_INTERVAL_MS | 15000 |
+
+Configuration is copied into the persisted account when it is created. Editing defaults does not silently change an existing account's rules. Reset creates a new account with current defaults.
+
+**Automatic paper flow:** `GPTHEIST WATCH → verified quote → paper risk checks → PAPER_ELIGIBLE → simulated buy → price tracking → exit`. All ten GPTHEIST handoffs must be present in order, with PASS from Rio, Lisbon, Palermo and Professor and no VETO anywhere. INFO from other stages stays INFO: the paper policy accepts WATCH without claiming that social quality has been verified. The research verdict remains WATCH; PAPER_ELIGIBLE is a separate paper result, recorded before the simulated buy. Replay results never enter this account.
+
+**Quotes:** the adapter checks Robinhood Chain identity, fresh block time, factory provenance, curve/token/pair identity, active curve state and token decimals. Reads are pinned to one block and its hash is checked again before the quote is accepted. Sized prices use the integer arithmetic documented in the [official Pons v2 integration guide](https://docs.ponsfamily.com/v2#getting-a-quote), including separately rounded protocol fee, creator tax, opening buy tax and constant-product price impact. Exact token units are persisted for exits. A reserve ratio is shown only as the raw marginal reference price; fills use the sized output.
+
+**USD conversion:** the server reads the public [Coinbase ETH-USD ticker](https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-ticker). Buys use ask and sells use bid as USD conversion references, with the exchange's timestamp retained. Quote, block and USD source must all be at most 30 seconds old and not future-dated. There is no fixed-price fallback or API key. This is a USD valuation model, not a claim that a cross-chain ETH conversion was executed.
+
+**Paper risk checks:** entry requires a completed WATCH, quote provenance, matching token/direction/size, sufficient real liquidity and cash, at most 5% modeled price impact, $10 maximum position size, no duplicate position, at most five open positions, and less than $50 gross realized losses during the UTC day. Each launch can be traded once; closed launches are not immediately re-bought. A risk rejection, missing quote or VETO is recorded with its reason. Existing saved account settings remain in effect.
+
+**Supported markets:** native ETH Pons v2 curves only. Unsupported pairs, unavailable reads, changed watch conditions, stale prices, closed curves, partial fills and buys reaching graduation are rejected. Graduated Uniswap pools are not yet quoted. If a held token graduates, its position remains open with an explicit unavailable-quote reason and last-known valuation; the app does not invent an exit price.
+
+**Fees and unknown costs:** modeled protocol/creator/opening fees and price impact are already included in the effective fill and are not charged twice. Gas and execution drift remain `null` and are excluded from P&L rather than assumed to be verified zero. Statistics disclose unknown costs. Paper buys do not alter on-chain reserves; the model does not simulate lasting market impact from its own positions.
+
+**Monitor and exits:** every retained position is monitored before discovery, independently of whether it is still in the launch window. The monitor waits 15 seconds after each completed cycle; network latency adds to that interval. Fresh quotes for the full held quantity update P&L and simulate a sell at the observed quote when net return reaches −10% or +20%. These are observed thresholds, not guaranteed stop prices. Exits continue even when entries are blocked by the daily loss limit or discovery fails. Missing/stale quotes and RPC failures retain the last-known valuation and flag it unavailable; they never produce a $0 exit.
+
+**Persistence:** `runs/paper/state.json` contains schema version, configuration, cash, full open/closed positions and quote evidence, candidate/entry decisions, exit reasons/events, equity history, gate, and structured activity. It is separate from replay `runs/*.jsonl`. It uses the existing safe-directory check, no-follow regular-file reads, a single-process writer lock, copy-on-write serialized updates, fsync, and atomic rename. Invalid state fails closed; it is never silently wiped. A terminated process's lock can be recovered on restart if its PID no longer exists. A lock with a reused/live PID or malformed contents needs manual inspection. Use a local filesystem and one server process per account; distributed/network filesystems and multi-worker deployment are unsupported. A durable mounted `runs` directory is required on ephemeral hosts. All history is retained: file size and whole-state write/API costs grow over time; archival/SQLite migration is future work.
+
+To reset **only PAPER data**, stop the Desk, then run:
+
+```bash
+npm run build
+node dist/src/cli.js paper-reset --confirm-paper-reset
+npm run desk
+```
+
+The reset refuses a running account owner, saves `runs/paper/reset-backup-<timestamp>.json`, and restores $1,000 with empty positions/trades/history apart from the initial snapshot. It does not touch research logs or unrelated configuration. If state is corrupt, restore a valid backup before using the reset command. SIGINT/SIGTERM shut down the Desk and release the lock.
+
+**Statistics (all persisted closed trades unless stated otherwise):**
+
+- Equity = cash + last-known net position liquidation values; unrealized P&L = those values minus entry cost bases. Newly opened positions use entry value until an independent exit mark exists and are flagged unavailable.
+- Realized P&L = sum of closed-trade net proceeds minus entry cost basis; total P&L = equity − starting balance; total return = total P&L / starting balance × 100.
+- Wins/losses count strictly positive/negative P&L; breakevens remain in total trades. Win rate = wins / total trades × 100 (0 when empty).
+- Gross profit = sum of winning P&L; gross loss = absolute sum of losing P&L. Net realized P&L = gross profit − gross loss.
+- Average win/loss = corresponding P&L sum / corresponding count (average loss is negative). Profit factor = gross profit / gross loss. Expectancy = net realized P&L / total trades.
+- Maximum drawdown = largest percentage decline from the running equity peak over **all** persisted snapshots; dollar drawdown is also returned. Stale-mark snapshots are flagged and cannot reveal unobserved intraperiod losses.
+- Average holding time = mean(exit timestamp − entry timestamp), in milliseconds. Known estimated costs sum executed simulated entry/exit estimates, not repeated marks; unknown-fill counts are separate.
+- Undefined averages, profit factor (including an all-win sample), and expectancy are `null` / `N/A`, never JSON Infinity. Losses and inconvenient history are not filtered out.
+
+**UI and API:** `GET /api/paper` exposes the persisted account plus derived statistics, server uptime origin, and data status. It returns the most recent 100 trades/decisions and 200 events for display; calculations still use all stored results. It has no mutation endpoint. The PAPER layout is **`assets/desk/paper.html`**, its page-specific styling is **`assets/desk/paper.css`**, rendering/chart logic is **`assets/desk/paper.js`**, and shared fonts/colors/navigation are **`assets/desk/desk.css`**. Values/events use text nodes rather than HTML injection. The chart uses actual timestamped equity snapshots, including a truthful flat initial balance. Activity objects include timestamp, category, actual stage, token identity, event type, message and metadata.
+
+Paper results do not guarantee real performance. This release provides a persistent account, monitor, risk/accounting engine, and live research audit UI; it supports automatic simulated curve trades after the separate quote and risk gates, without claiming a validated trading strategy or guaranteed real fills. Deterministic prices in the tests are fixtures only and cannot be imported through any endpoint.

@@ -4,6 +4,10 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_RPC_URL, ROBINHOOD_CHAIN_ID, fetchLiveSnapshot, type LiveSnapshot, type RpcCaller } from "./live.js";
 
+import { PaperQuoteService } from "./paper-quotes.js";
+import { PaperStore } from "./paper-store.js";
+import { PaperService } from "./paper-service.js";
+
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const DEFAULT_ASSETS = resolve(projectRoot, "assets/desk");
 const SECURITY_HEADERS = {
@@ -15,12 +19,14 @@ const SECURITY_HEADERS = {
 } as const;
 
 export interface DeskServerOptions {
+  paperDirectory?: string;
   rpc?: RpcCaller;
   rpcUrl?: string;
   assetsRoot?: string;
   cacheMs?: number;
   failureCacheMs?: number;
   socialFetch?: typeof fetch;
+  paperUsdFetch?: typeof fetch;
 }
 
 export interface RpcCallerOptions {
@@ -40,6 +46,7 @@ export function createHttpRpcCaller(url?: string, options: RpcCallerOptions = {}
   ]).map((value) => ({ url: value.replace(/#nologs$/, ""), logs: !value.endsWith("#nologs") }));
   const sleep = (milliseconds: number): Promise<void> => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
   return async (method, params = []) => {
+    if (!["eth_chainId", "eth_blockNumber", "eth_getLogs", "eth_call", "eth_getBlockByNumber"].includes(method)) throw new Error("RPC method is outside the read-only allowlist");
     const candidates = endpoints.filter((endpoint) => method !== "eth_getLogs" || endpoint.logs);
     if (candidates.length === 0) throw new Error("No configured RPC endpoint supports eth_getLogs");
     let lastError = "RPC request failed";
@@ -118,7 +125,17 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
     }
     return pending;
   };
+  let paper: PaperService | undefined;
+  let paperError: string | null = null;
+  const paperReady = options.paperDirectory ? PaperStore.open(options.paperDirectory).then(store => {
+    const quotes = new PaperQuoteService(rpc, store.read().config, options.paperUsdFetch);
+    paper = new PaperService(store, snapshot, position => quotes.sell(position),
+      (launch, sizeUsd) => quotes.buy(launch, sizeUsd), quotes); paper.start();
+  }).catch((error: unknown) => { paperError = error instanceof Error ? error.message : "Paper storage unavailable"; }) : Promise.resolve();
   const assets: Record<string, [string, string]> = {
+    "/paper": ["paper.html", "text/html; charset=utf-8"],
+    "/paper.js": ["paper.js", "text/javascript; charset=utf-8"],
+    "/paper.css": ["paper.css", "text/css; charset=utf-8"],
     "/": ["index.html", "text/html; charset=utf-8"],
     "/index.html": ["index.html", "text/html; charset=utf-8"],
     "/trace": ["room.html", "text/html; charset=utf-8"],
@@ -130,12 +147,17 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
     "/rooms.js": ["rooms.js", "text/javascript; charset=utf-8"]
   };
 
-  return createServer(async (request, response) => {
+  const server = createServer(async (request, response) => {
     try {
       const requestUrl = new URL(request.url ?? "/", "http://localhost");
       const path = requestUrl.pathname;
       if (request.method !== "GET") {
         send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" }));
+        return;
+      }
+      if (path === "/api/paper") {
+        await paperReady;
+        send(response, paper ? 200 : 503, "application/json; charset=utf-8", JSON.stringify(paper ? paper.view() : { mode: "PAPER", error: paperError ?? "Paper service not configured" }));
         return;
       }
       if (path === "/health") {
@@ -207,10 +229,12 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
       send(response, 500, "text/plain; charset=utf-8", "Internal error\n");
     }
   });
+  server.once("close", () => { void paperReady.then(() => paper?.close()).catch(() => undefined); });
+  return server;
 }
 
 export async function startDeskServer(options: DeskServerOptions & { host?: string; port?: number } = {}): Promise<Server> {
-  const server = createDeskServer(options);
+  const server = createDeskServer({ ...options, paperDirectory: options.paperDirectory ?? resolve(process.cwd(), "runs/paper") });
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 4173;
   server.listen(port, host);

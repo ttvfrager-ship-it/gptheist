@@ -48,6 +48,7 @@
     "typescript": "^5.7.0"
   },
   "dependencies": {
+    "codex": "^0.2.3",
     "viem": "^2.56.3"
   }
 }
