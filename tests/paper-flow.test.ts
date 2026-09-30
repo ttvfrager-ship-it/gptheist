@@ -1,10 +1,12 @@
+import { seedLiquidityHistory, seedTractionHistory } from "./liquidity-history-fixture.js";
+import { enterPaper, observeSnapshot } from "./liquidity-history-fixture.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type LiveLaunchDecision } from "../src/live.js";
-import { accountSummary, enterPaper, initialPaperState, liveCandidate, observeSnapshot, quoteProblem } from "../src/paper.js";
+import {  accountSummary, initialPaperState, liveCandidate, quoteProblem  } from "../src/paper.js";
 import { createEthUsdProvider, readPaperQuote } from "../src/paper-quotes.js";
 import { PaperService } from "../src/paper-service.js";
 import { PaperStore } from "../src/paper-store.js";
@@ -18,7 +20,7 @@ test("full WATCH chain → verified sized quote → risk checks → PAPER_ELIGIB
   assert.equal(s.positions.length, 1); assert.equal(s.cash, 1000 - s.positions[0]!.sizeUsd);
   assert.equal(s.positions[0]!.candidate.decision, "WATCH");
   assert.equal(s.decisions[0]!.outcome, "PAPER_ELIGIBLE");
-  for (const event of ["WATCH", "QUOTE_VERIFIED", "PAPER_ELIGIBLE", "POSITION_SIZE_CALCULATED", "TRADE_PLAN_CREATED", "PAPER_BUY"]) assert.ok(s.events.some(e => e.eventType === event));
+  for (const event of ["QUOTE_VERIFIED", "PAPER_ELIGIBLE", "POSITION_SIZE_CALCULATED", "TRADE_PLAN_CREATED", "PAPER_BUY"]) assert.ok(s.events.some(e => e.eventType === event));
   assert.equal(s.events.filter(e => e.category === "RESEARCH").length, 10);
   const q = s.positions[0]!.entry;
   assert.ok(BigInt(q.tokenUnits!) > 0n);
@@ -104,11 +106,15 @@ for (const [reserve, reason] of [[3n, "TRAILING_EXIT"], [1n, "DYNAMIC_RISK_EXIT"
     const entry = (_launch: LiveLaunchDecision, sizeUsd: number) => readPaperQuote(f.rpc, async () => f.state.usd, f.launch, { side: "BUY", sizeUsd });
     const exit = (p: import("../src/paper.js").Position) => readPaperQuote(f.rpc, async () => f.state.usd, f.launch,
       { side: "SELL", tokenUnits: p.entry.tokenUnits!, quantity: p.quantity });
-    let service = new PaperService(store, async () => f.snapshot, exit, entry);
+    const initialQuote = await f.buy();
+    if (initialQuote.status !== "AVAILABLE") throw new Error("fixture");
+    await store.update(state => { const candidate = liveCandidate(f.launch); seedTractionHistory(state, candidate); seedLiquidityHistory(state, candidate, initialQuote.quote); });
+    let retryTime = Date.now();
+    let service = new PaperService(store, async () => f.snapshot, exit, entry, undefined, () => retryTime);
     try { await service.tick(); assert.equal(store.read().positions.length, 1); }
     finally { await service.close(); }
     store = await PaperStore.open(directory);
-    service = new PaperService(store, async () => f.snapshot, exit, entry);
+    service = new PaperService(store, async () => f.snapshot, exit, entry, undefined, () => retryTime);
     try {
       f.state.reserve = 21n * eth / 10n;
       await service.tick(); assert.equal(store.read().positions.length, 1);
@@ -117,6 +123,9 @@ for (const [reserve, reason] of [[3n, "TRAILING_EXIT"], [1n, "DYNAMIC_RISK_EXIT"
       f.state.fail = true; await service.tick();
       assert.equal(store.read().positions[0]!.current.fillPriceUsd, mark);
       assert.equal(store.read().positions[0]!.markStatus, "UNAVAILABLE");
+      const callsBeforeCooldown = f.methods.length;
+      await service.monitor(); assert.equal(f.methods.length, callsBeforeCooldown, "RPC backoff prevents immediate repeated requests");
+      retryTime += 60_001;
       f.state.fail = false; f.state.reserve = reserve * eth;
       await service.tick();
       if (reserve === 3n) { f.state.reserve = 26n * eth / 10n; await service.tick(); }
@@ -164,7 +173,7 @@ test("monitor refreshes while discovery is blocked and preserves the underlying 
     assert.equal(p.markReason, "INSUFFICIENT_EXIT_LIQUIDITY");
     assert.equal(p.markStatus, "UNAVAILABLE");
     assert.ok(p.lastQuoteAttempt);
-    assert.equal(p.management.lastSuccessfulQuote, null);
+    assert.equal(p.management.lastSuccessfulQuote?.side, "SELL");
     assert.deepEqual(p.quoteFailureDetails, ["Real reserve is 1 wei"]);
   } finally { release(f.snapshot); await tick; await service.close(); }
 });
@@ -185,4 +194,27 @@ test("failed liquidity quotes retain exact inputs, raw responses, and validated 
   assert.equal(result.diagnostics?.calculation?.realQuoteReserveWei, "1");
   assert.equal(result.diagnostics?.launchTimestamp, new Date(Math.floor(launchTime / 1000) * 1000).toISOString());
   assert.equal(result.diagnostics?.rpc.filter(r => r.method === "eth_call" && typeof r.response === "string").length, 2);
+});
+
+
+test("entry stores market cap from the pinned spot price and total supply", async () => {
+  const f = fixture(), state = initialPaperState(f.time);
+  await observeSnapshot(state, f.snapshot, f.time, (_launch, size) => f.buy(size));
+  const position = state.positions[0]!;
+  assert.equal(position.entry.totalSupplyTokens, "1000000000");
+  assert.equal(position.entry.marketCapUsd, position.entry.rawPriceUsd * 1_000_000_000);
+  const savedCap = position.entry.marketCapUsd;
+  f.state.reserve *= 2n; f.state.supply = 2_000_000_000n * eth;
+  const newQuote = await f.buy(); assert.equal(newQuote.status, "AVAILABLE");
+  if (newQuote.status === "AVAILABLE") assert.notEqual(newQuote.quote.marketCapUsd, savedCap);
+  assert.equal(position.entry.marketCapUsd, savedCap);
+});
+
+test("missing total supply leaves market cap unknown without rejecting executable quotes", async () => {
+  const f = fixture(); f.state.supply = null;
+  const result = await f.buy(); assert.equal(result.status, "AVAILABLE");
+  if (result.status === "AVAILABLE") {
+    assert.equal(result.quote.marketCapUsd, undefined);
+    assert.equal(result.quote.totalSupplyTokens, undefined);
+  }
 });

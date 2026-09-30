@@ -38,7 +38,9 @@
     "test": "npm run build && node --test dist/tests/*.test.js",
     "demo": "npm run build --silent && node dist/src/cli.js demo",
     "desk": "npm run build --silent && node dist/src/cli.js desk",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "debug:paper-sell": "npm run build --silent && node scripts/debug-paper-sell.mjs",
+    "debug:liquidity-traps": "npm run build --silent && node scripts/debug-liquidity-traps.mjs"
   },
   "engines": {
     "node": ">=18"

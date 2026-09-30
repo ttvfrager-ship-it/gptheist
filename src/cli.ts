@@ -52,8 +52,9 @@ async function main(args: string[]): Promise<void> {
   if (command === "paper-reset") {
     if (args[1] !== "--confirm-paper-reset") throw new Error("Stop the Desk, then use paper-reset --confirm-paper-reset (PAPER data only; backup retained)");
     const store = await PaperStore.open(resolve(process.cwd(), "runs/paper"));
-    try { await store.reset(); } finally { await store.close(); }
-    process.stdout.write("PAPER account reset to $1,000. Prior PAPER state backed up. Research data unchanged.\n");
+    let balance = 0;
+    try { await store.reset(); balance = store.read().config.STARTING_BALANCE_USD; } finally { await store.close(); }
+    process.stdout.write(`PAPER account reset to ${new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(balance)}. Prior PAPER state backed up. Research data unchanged.\n`);
     return;
   }
   if (command === "demo") {

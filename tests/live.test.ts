@@ -281,7 +281,7 @@ test("fetches real-shaped Robinhood logs and turns each launch into ten inspecta
     priorLaunches: 0,
     priorGraduations: 0
   });
-  assert.deepEqual(methods, ["eth_chainId", "eth_blockNumber", "eth_getLogs", "eth_getLogs", "eth_call"]);
+  assert.deepEqual(methods, ["eth_chainId", "eth_blockNumber", "eth_getLogs", "eth_getLogs", "eth_call", "eth_getBlockByNumber", "eth_getBlockByNumber"]);
 });
 
 test("fetches market evidence with read-only calls pinned to the snapshot head", async () => {

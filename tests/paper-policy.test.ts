@@ -1,10 +1,11 @@
+import { enterPaper, preparePaperTrade } from "./liquidity-history-fixture.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp, readFile, writeFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PAPER_CONFIG, accountSummary, enterPaper, initialPaperState, isPaperTradeEligible, liveCandidate, markPaperPosition,
-  monitorPaper, preparePaperTrade, type PaperQuote, type PaperState, type QuoteResult } from "../src/paper.js";
+import {  PAPER_CONFIG, accountSummary, initialPaperState, isPaperTradeEligible, liveCandidate, markPaperPosition,
+  monitorPaper, type PaperQuote, type PaperState, type QuoteResult  } from "../src/paper.js";
 import { accountCapacity, evaluateExit, proposeTradePlan } from "../src/paper-policy.js";
 import { PaperQuoteService, createEthUsdProvider, readPaperQuote } from "../src/paper-quotes.js";
 import { PaperStore } from "../src/paper-store.js";
@@ -22,13 +23,13 @@ function sell(p: PaperState["positions"][number], multiplier: number, time = Dat
   q.side = "SELL"; q.timestamp = new Date(time).toISOString(); q.blockTimestamp = q.timestamp;
   q.notionalUsd = p.costBasisUsd * multiplier; q.fillPriceUsd = q.notionalUsd / q.quantity;
   q.costs.gasUsd = null;
-  if (q.evidence) { q.evidence.usdTimestamp = q.timestamp; q.evidence.snipeTaxBps = 0; }
+  if (q.evidence) { q.evidence.usdTimestamp = q.timestamp; q.evidence.snipeTaxBps = 0; q.evidence.amountIn = q.tokenUnits!; q.evidence.amountOut = String(BigInt(Math.round(q.notionalUsd / q.evidence.ethUsd * 1e18))); }
   return q;
 }
 
 test("different verified score/progress/taxes yield different sizes, risk budgets and exit policies", async () => {
   const good = fixture(), weaker = fixture();
-  weaker.launch.assessment.score = 70; weaker.state.real /= 10n; weaker.state.snipe = 200n;
+  weaker.launch.assessment.score = 70; weaker.state.usd.bid = 200; weaker.state.usd.ask = 200; weaker.state.snipe = 50n;
   const a = await open(good), b = await open(weaker);
   assert.notEqual(a.p.sizeUsd, b.p.sizeUsd);
   assert.notEqual(a.p.plan.riskBudgetUsd, b.p.plan.riskBudgetUsd);
@@ -42,7 +43,7 @@ test("different verified score/progress/taxes yield different sizes, risk budget
 });
 
 test("sizing scales with account equity instead of a fixed dollar trade", async () => {
-  const f = fixture();
+  const f = fixture(); f.state.fee = 0n;
   const a = await open(f, initialPaperState(f.time, { ...PAPER_CONFIG, STARTING_BALANCE_USD: 1000 }));
   const b = await open(f, initialPaperState(f.time, { ...PAPER_CONFIG, STARTING_BALANCE_USD: 2000 }));
   assert.ok(b.p.sizeUsd > a.p.sizeUsd);
@@ -56,7 +57,7 @@ test("sizer reduces and requotes excessive measured impact; minimum size can rej
   await preparePaperTrade(s, liveCandidate(f.launch), async (_l, size) => {
     requested.push(size);
     const result = await f.buy(size);
-    if (result.status === "AVAILABLE") result.quote.costs.priceImpactPercent = size / 3;
+    if (result.status === "AVAILABLE") result.quote.costs.priceImpactPercent = size / 2;
     return result;
   }, () => f.time);
   assert.equal(s.positions.length, 1); assert.ok(s.positions[0]!.sizeUsd <= 6);
@@ -71,7 +72,7 @@ test("sizer reduces and requotes excessive measured impact; minimum size can rej
 
 test("portfolio exposure, cash reserve, per-position caps and known gas constrain entry", async () => {
   const f = fixture(), s = initialPaperState(f.time);
-  s.config.MAX_PORTFOLIO_EXPOSURE_PERCENT = 1;
+  s.config.MAX_PORTFOLIO_EXPOSURE_PERCENT = .5;
   const a = await open(f, s); assert.ok(a.p.sizeUsd <= 10);
   assert.ok(accountCapacity(s).availableCapacityUsd < s.config.MIN_POSITION_USD);
   const c = liveCandidate(f.launch); c.tokenAddress = `0x${"4".repeat(40)}`; c.launchId = "another";
@@ -168,7 +169,7 @@ test("graduation and missing sell liquidity retain position without a fictional 
   await monitorPaper(s, position => readPaperQuote(f.rpc, async () => f.state.usd, f.launch,
     { side: "SELL", tokenUnits: position.entry.tokenUnits!, quantity: position.quantity }, () => f.time), () => f.time);
   assert.equal(s.positions.length, 1); assert.equal(s.trades.length, 0);
-  assert.equal(p.markReason, "GRADUATED_QUOTE_UNAVAILABLE"); assert.ok(p.current.notionalUsd > 0);
+  assert.equal(p.markReason, "TOKEN_GRADUATED"); assert.ok(p.current.notionalUsd > 0);
 });
 
 test("ETH/USD unavailable, stale, and malformed are precise failures; age is configurable", async () => {

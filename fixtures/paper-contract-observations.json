@@ -1,0 +1,256 @@
+{
+  "provenance": "Live read-only event and pinned parent-state capture on Robinhood chain 4663, 2026-09-28. Actual settled public trades; not generated prices.",
+  "buy": [
+    {
+      "block": "0x46f85c7",
+      "parent": "0x46f85c6",
+      "transactionHash": "0x4c9dbe4e2a9439876c46b92ae303c8810a7ea3e0c0cf3f714b9df0d337cf6985",
+      "rawEvent": {
+        "address": "0x7dcb4bd9f210f902b53fba4fa2b574fa323ebef2",
+        "topics": [
+          "0xec36bf571f136799e8dc0b0b8bea4b04d8bd3d43de838aab0d5fc21d4cbfc455",
+          "0x00000000000000000000000043febc72de1137a1f1e3b1e09c5b20276ed29fd6",
+          "0x00000000000000000000000043febc72de1137a1f1e3b1e09c5b20276ed29fd6"
+        ],
+        "data": "0x0000000000000000000000000000000000000000000000000002a106ad2240000000000000000000000000000000000000000000000055ea7f1c73b435411292000000000000000000000000000000000000000000000000000006baf25f100000000000000000000000000000000000000000000000000000000d75e4be2000",
+        "blockNumber": "0x46f85c7",
+        "transactionHash": "0x4c9dbe4e2a9439876c46b92ae303c8810a7ea3e0c0cf3f714b9df0d337cf6985",
+        "transactionIndex": "0x5",
+        "blockHash": "0xe54e1d1c60ce5a488242269958e61ae8ab44a0d3c0fb9cd18a8a3cab4c50b11f",
+        "blockTimestamp": "0x0",
+        "logIndex": "0x3",
+        "removed": false
+      },
+      "rawReserves": "0x00000000000000000000000000000000000000000000000017eba28aef1a2000000000000000000000000000000000000000000003263ba2cb65f746a8b0fa97",
+      "quoteIn": "740000000000000",
+      "fee": "7400000000000",
+      "tax": "14800000000000",
+      "expected": "405726848480127867753106",
+      "actual": "405726848480127867753106",
+      "matches": true,
+      "limitation": "No source-bytecode equivalence claim; only this actual settled trade is cross-checked. Nonzero snipe taxes require separate proof."
+    }
+  ],
+  "sells": [
+    {
+      "rawEvent": {
+        "address": "0x50943153679ca5b559184e4dd93fb816f61e936a",
+        "topics": [
+          "0x8113d738abdcb6b38357e9d53a54a7157861a09031b453651f0fe7fe151f59df",
+          "0x000000000000000000000000edefd3e3affbf57688946cd66104834860f0c650",
+          "0x000000000000000000000000edefd3e3affbf57688946cd66104834860f0c650"
+        ],
+        "data": "0x0000000000000000000000000000000000000000004197f6a09616ee51127385000000000000000000000000000000000000000000000000036954f7c71990fa00000000000000000000000000000000000000000000000000090cd17d6bb4910000000000000000000000000000000000000000000000000016a00bb98d436c",
+        "blockNumber": "0x46f92a5",
+        "transactionHash": "0x60f2cbf60db84e6be63bb73973ea7eecd46007634a613cd85f8f547782536561",
+        "transactionIndex": "0x8",
+        "blockHash": "0x471f3b7321d5afd4b74ee2d348a9dfc227a96bd51ac5d09648934b97eeb6b615",
+        "blockTimestamp": "0x0",
+        "logIndex": "0x4e",
+        "removed": false
+      },
+      "parent": "0x46f92a4",
+      "reads": {
+        "getReserves": {
+          "raw": "0x000000000000000000000000000000000000000000000000220e3f429faf9d9a000000000000000000000000000000000000000002364ad4aa06b697b998138a",
+          "decoded": [
+            "2453968402342976922",
+            "684605391983036692132533130"
+          ]
+        },
+        "feeBps": {
+          "raw": "0x0000000000000000000000000000000000000000000000000000000000000064",
+          "decoded": "100"
+        },
+        "creatorTaxBps": {
+          "raw": "0x00000000000000000000000000000000000000000000000000000000000000fa",
+          "decoded": "250"
+        },
+        "factory": {
+          "raw": "0x0000000000000000000000007ed598bcef8bd9edd8c97a195c6d13f40801ec7e",
+          "decoded": "0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e"
+        }
+      },
+      "expected": "245821077842399482",
+      "actual": "245821077842399482",
+      "factoryMatches": true,
+      "matches": true
+    },
+    {
+      "rawEvent": {
+        "address": "0x50943153679ca5b559184e4dd93fb816f61e936a",
+        "topics": [
+          "0x8113d738abdcb6b38357e9d53a54a7157861a09031b453651f0fe7fe151f59df",
+          "0x000000000000000000000000cca4a9e1f592b968c775d1481e2a46843c972f69",
+          "0x000000000000000000000000cca4a9e1f592b968c775d1481e2a46843c972f69"
+        ],
+        "data": "0x00000000000000000000000000000000000000000059d5e4c613d55374fb8ea000000000000000000000000000000000000000000000000003aa817ceb3544510000000000000000000000000000000000000000000000000009b9b703c38954000000000000000000000000000000000000000000000000001850498968d752",
+        "blockNumber": "0x46f92a9",
+        "transactionHash": "0x78deec877896bf2950d592b65ad4ecc3b4449d3237b49e3b804b673b7c3d5552",
+        "transactionIndex": "0x2",
+        "blockHash": "0x64a55341287d8ffc22ea6c2f1a8d972ee96089c592a4100e4c548c6d9612d88c",
+        "blockTimestamp": "0x0",
+        "logIndex": "0x4",
+        "removed": false
+      },
+      "parent": "0x46f92a8",
+      "reads": {
+        "getReserves": {
+          "raw": "0x0000000000000000000000000000000000000000000000001e853d6da19d14a300000000000000000000000000000000000000000277e2cb4a9ccd860aaa870f",
+          "decoded": [
+            "2199231534112511139",
+            "763903197067404542858659599"
+          ]
+        },
+        "feeBps": {
+          "raw": "0x0000000000000000000000000000000000000000000000000000000000000064",
+          "decoded": "100"
+        },
+        "creatorTaxBps": {
+          "raw": "0x00000000000000000000000000000000000000000000000000000000000000fa",
+          "decoded": "250"
+        },
+        "factory": {
+          "raw": "0x0000000000000000000000007ed598bcef8bd9edd8c97a195c6d13f40801ec7e",
+          "decoded": "0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e"
+        }
+      },
+      "expected": "264165901676659793",
+      "actual": "264165901676659793",
+      "factoryMatches": true,
+      "matches": true
+    },
+    {
+      "rawEvent": {
+        "address": "0xbffb18da1ec6be6b4232ba3e9ebbedf066be3a5a",
+        "topics": [
+          "0x8113d738abdcb6b38357e9d53a54a7157861a09031b453651f0fe7fe151f59df",
+          "0x0000000000000000000000008f10b468b06c6fd214b65f87778827f7d113f996",
+          "0x0000000000000000000000008f10b468b06c6fd214b65f87778827f7d113f996"
+        ],
+        "data": "0x0000000000000000000000000000000000000000000b8ca7b7566da2440c8c1b0000000000000000000000000000000000000000000000586deb060183421101000000000000000000000000000000000000000000000000ebcfc8100408b02d000000000000000000000000000000000000000000000002c36f58300c1a1087",
+        "blockNumber": "0x46f92b7",
+        "transactionHash": "0x55299fb79dabde6afdc4ad2546495d6d582e559982298953a482387f98f4b320",
+        "transactionIndex": "0x1",
+        "blockHash": "0x194e6ebfe4ad10049bb420c0488b272e36cf8cd0226480a4ef8d196eb287159d",
+        "blockTimestamp": "0x0",
+        "logIndex": "0xf",
+        "removed": false
+      },
+      "parent": "0x46f92b6",
+      "reads": {
+        "getReserves": {
+          "raw": "0x000000000000000000000000000000000000000000001831019510760240ed16000000000000000000000000000000000000000002fcf1461085757c5cc547ff",
+          "decoded": [
+            "114240800063947850968342",
+            "924758708970520287142823935"
+          ]
+        },
+        "feeBps": {
+          "raw": "0x0000000000000000000000000000000000000000000000000000000000000064",
+          "decoded": "100"
+        },
+        "creatorTaxBps": {
+          "raw": "0x000000000000000000000000000000000000000000000000000000000000012c",
+          "decoded": "300"
+        },
+        "factory": {
+          "raw": "0x0000000000000000000000007ed598bcef8bd9edd8c97a195c6d13f40801ec7e",
+          "decoded": "0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e"
+        }
+      },
+      "expected": "1631233909459668570369",
+      "actual": "1631233909459668570369",
+      "factoryMatches": true,
+      "matches": true
+    },
+    {
+      "rawEvent": {
+        "address": "0xbffb18da1ec6be6b4232ba3e9ebbedf066be3a5a",
+        "topics": [
+          "0x8113d738abdcb6b38357e9d53a54a7157861a09031b453651f0fe7fe151f59df",
+          "0x00000000000000000000000065050a9b7e5075a2ba5ced7b1b64ee66262c40dc",
+          "0x00000000000000000000000065050a9b7e5075a2ba5ced7b1b64ee66262c40dc"
+        ],
+        "data": "0x00000000000000000000000000000000000000000006aeb4dd9f5125927b4dac000000000000000000000000000000000000000000000031f945a75dfbce0c5c00000000000000000000000000000000000000000000000085436468fa9f7acb0000000000000000000000000000000000000000000000018fca2d3aefde7062",
+        "blockNumber": "0x46f92ba",
+        "transactionHash": "0x6a215a174a37011e7c665d452b6f2593b76613911909fecb20f7aaa0c8813381",
+        "transactionIndex": "0x9",
+        "blockHash": "0x688300f8849fe8e44261e14712c47e526d84c16706e4c13c838a99c86054d9dd",
+        "blockTimestamp": "0x0",
+        "logIndex": "0xf",
+        "removed": false
+      },
+      "parent": "0x46f92b9",
+      "reads": {
+        "getReserves": {
+          "raw": "0x0000000000000000000000000000000000000000000017d4e46aea346edc1b61000000000000000000000000000000000000000003087dedc7dbe31ea0d1d41a",
+          "decoded": [
+            "112541598074927362874209",
+            "938721118111010368521360410"
+          ]
+        },
+        "feeBps": {
+          "raw": "0x0000000000000000000000000000000000000000000000000000000000000064",
+          "decoded": "100"
+        },
+        "creatorTaxBps": {
+          "raw": "0x000000000000000000000000000000000000000000000000000000000000012c",
+          "decoded": "300"
+        },
+        "factory": {
+          "raw": "0x0000000000000000000000007ed598bcef8bd9edd8c97a195c6d13f40801ec7e",
+          "decoded": "0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e"
+        }
+      },
+      "expected": "921852406322703502428",
+      "actual": "921852406322703502428",
+      "factoryMatches": true,
+      "matches": true
+    },
+    {
+      "rawEvent": {
+        "address": "0x50943153679ca5b559184e4dd93fb816f61e936a",
+        "topics": [
+          "0x8113d738abdcb6b38357e9d53a54a7157861a09031b453651f0fe7fe151f59df",
+          "0x000000000000000000000000bfb0d6dd9a9522d35c6c0ccf45b003f803c2cdfa",
+          "0x000000000000000000000000bfb0d6dd9a9522d35c6c0ccf45b003f803c2cdfa"
+        ],
+        "data": "0x0000000000000000000000000000000000000000000031251072f03de1a3c4a70000000000000000000000000000000000000000000000000001c162e629e892000000000000000000000000000000000000000000000000000004a82786673700000000000000000000000000000000000000000000000000000ba462d0020b",
+        "blockNumber": "0x46f92d7",
+        "transactionHash": "0x7b16f9ada6db3ac1463f125944598d7e39b5ed5c808a0fe79fb409df493a1091",
+        "transactionIndex": "0x1",
+        "blockHash": "0x7a8464201e8299e93e298c8a43334bd47cec8c5c57571c337d1504d01158a543",
+        "blockTimestamp": "0x0",
+        "logIndex": "0x1",
+        "removed": false
+      },
+      "parent": "0x46f92d6",
+      "reads": {
+        "getReserves": {
+          "raw": "0x0000000000000000000000000000000000000000000000001ab8b1f0293b6fac000000000000000000000000000000000000000002d1b8b010b0a2d97fa615af",
+          "decoded": [
+            "1925484485742915500",
+            "872507679204592778104673711"
+          ]
+        },
+        "feeBps": {
+          "raw": "0x0000000000000000000000000000000000000000000000000000000000000064",
+          "decoded": "100"
+        },
+        "creatorTaxBps": {
+          "raw": "0x00000000000000000000000000000000000000000000000000000000000000fa",
+          "decoded": "250"
+        },
+        "factory": {
+          "raw": "0x0000000000000000000000007ed598bcef8bd9edd8c97a195c6d13f40801ec7e",
+          "decoded": "0x7eD598BcEf8bd9Edd8C97A195C6d13f40801EC7e"
+        }
+      },
+      "expected": "494105489172626",
+      "actual": "494105489172626",
+      "factoryMatches": true,
+      "matches": true
+    }
+  ]
+}

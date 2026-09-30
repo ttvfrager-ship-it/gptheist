@@ -221,3 +221,41 @@ The reset refuses a running account owner, saves `runs/paper/reset-backup-<times
 **UI and API:** `GET /api/paper` exposes the persisted account plus derived statistics, server uptime origin, and data status. It returns the most recent 100 trades/decisions and 200 events for display; calculations still use all stored results. It has no mutation endpoint. The PAPER layout is **`assets/desk/paper.html`**, its page-specific styling is **`assets/desk/paper.css`**, rendering/chart logic is **`assets/desk/paper.js`**, and shared fonts/colors/navigation are **`assets/desk/desk.css`**. Values/events use text nodes rather than HTML injection. The chart uses actual timestamped equity snapshots, including a truthful flat initial balance. Activity objects include timestamp, category, actual stage, token identity, event type, message and metadata.
 
 Paper results do not guarantee real performance. This release provides a persistent account, monitor, risk/accounting engine, and live research audit UI; it supports automatic simulated curve trades after the separate quote and risk gates, without claiming a validated trading strategy or guaranteed real fills. Deterministic prices in the tests are fixtures only and cannot be imported through any endpoint.
+
+Fresh-launch PAPER entries require verified launch/head block timestamps and a `LIVE`
+launch event. Set `PAPER_MAX_LAUNCH_AGE_SECONDS` in the desk environment (default: 300
+seconds; positive finite number). The setting is saved with the paper account and
+can be overridden on startup. Missing chronology fails closed. Existing positions
+keep their saved sizing and exit policies; passing the entry-age limit never causes
+an exit.
+
+Discovery retains its 25,000-block context window. The first successful scan is
+`BACKFILL`; later scans mark only previously unseen launch events beyond the prior
+observed head as `LIVE`. Repeated events and restarts are conservative backfill.
+The PAPER table shows age in seconds at the verified head, event mode, and recent
+traction. Traction compares pinned states no more than 300 seconds apart:
+`VERIFIED` means reserve/progress changed (either direction), `WEAK` means those
+endpoints are unchanged, and `UNKNOWN` means no valid comparison. Tax deltas are
+reported separately. No trade counts, participant counts, volume, or exact last
+activity times are inferred from those deltas.
+
+Paper quote reliability: every production buy quote now includes an independent,
+full-quantity sell quote. Entry rejects missing/stale round trips, unverified token
+units, stale account valuations, and absent positive verified reserve/progress
+changes. Launch provenance remains LIVE during observation within the same process;
+startup backfills remain ineligible. Token quantities stay in raw bigint units.
+
+`PAPER_QUOTE_REFRESH_MS` controls position refresh independently of discovery
+(default 5000; minimum 1000). Quote jobs use concurrency two, per-token serialization,
+RPC timeouts/retries and transient-failure backoff. Failed reads retain the previous
+value as stale and cannot settle an exit. Gas and execution drift remain unknown.
+
+The offline paper laboratory consumes captured `PAPER_LAB_FRAME` evidence, keeps
+CONTROL/SELECTIVE/FAST_FAILURE/RUNNER portfolios separate, rejects future frames,
+and rejects missing exact-size quotes instead of interpolating fills. Export frames
+as a JSON array, then run `node scripts/paper-laboratory.mjs frames.json lab.json`.
+Early captures can lack the sized quote tape and must not be treated as a fair
+strategy-performance comparison. Laboratory settings do not modify the primary plan.
+
+See [the reliability audit](PAPER_ENGINE_AUDIT.md) for numerical live examples,
+contract-event cross-checks, test results, and remaining verification limitations.

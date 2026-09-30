@@ -18,11 +18,11 @@ server.listen(0, '127.0.0.1'); await once(server, 'listening');
 const base = `http://127.0.0.1:${server.address().port}`;
 const observations = [];
 const snapshots = [];
-const watchdog = setTimeout(() => { console.error('Validation exceeded four minutes'); process.exitCode = 1; server.close(); server.closeAllConnections(); }, 240_000);
+const watchdog = setTimeout(() => { console.error('Validation exceeded four minutes'); process.exitCode = 1; server.close(); server.closeAllConnections(); }, 420_000);
 try {
   const html = await (await fetch(`${base}/paper`)).text();
   console.log(JSON.stringify({ directory, url: `${base}/paper`, paperHtml: html.includes('PAPER MODE'), startedAt: new Date().toISOString() }));
-  for (let cycle = 0; cycle < 5; cycle++) {
+  for (let cycle = 0; cycle < 12; cycle++) {
     try {
       const response = await fetch(`${base}/api/snapshot`, { signal: AbortSignal.timeout(35_000) });
       const snapshot = await response.json(); snapshots.push(snapshot);
@@ -33,9 +33,12 @@ try {
     const paper = await (await fetch(`${base}/api/paper`)).json();
     observations.push(paper);
     console.log(JSON.stringify({ cycle, at: new Date().toISOString(), quoteHealth: paper.quoteHealth,
-      decisions: paper.decisions?.map(d => ({ token: d.candidate.tokenAddress, symbol: d.candidate.symbol, gptheist: d.gptheistVerdict, paper: d.paperVerdict, reason: d.reason, size: d.sizeUsd })),
+      decisions: paper.decisions?.slice(-24).map(d => ({ token: d.candidate.tokenAddress, symbol: d.candidate.symbol, gptheist: d.gptheistVerdict, paper: d.paperVerdict, reason: d.reason, size: d.sizeUsd })),
+      positionQuotes: paper.positions?.map(p => ({ token: p.tokenAddress, quantity: p.quantity, tokenUnits: p.entry.tokenUnits,
+        timestamp: p.management.lastSuccessfulQuoteTimestamp, block: p.current.blockNumber, rawSellOutput: p.current.evidence?.amountOut,
+        ethUsd: p.current.evidence?.ethUsd, liquidationUsd: p.current.notionalUsd, status: p.quoteStatus, ageMs: p.quoteAgeMs })),
       open: paper.positions?.length, closed: paper.trades?.length, error: paper.error }));
-    if (cycle < 4) await new Promise(resolve => setTimeout(resolve, 15_000));
+    if (cycle < 11) await new Promise(resolve => setTimeout(resolve, 15_000));
   }
 } finally {
   clearTimeout(watchdog);

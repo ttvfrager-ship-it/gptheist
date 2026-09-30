@@ -1,3 +1,4 @@
+import { launchEvidence, type LaunchEvidence } from "./launch-evidence.js";
 import { AGENTS, type AgentHandoff, type AgentOutcome } from "./simulation.js";
 import { assessPonsLaunch, readPonsLaunchResearch, type PonsAssessment, type PonsMarketState, type PonsTokenMetadata } from "./market.js";
 import { toEventSelector } from "viem";
@@ -10,6 +11,8 @@ export const DEFAULT_RPC_URL = "https://rpc.mainnet.chain.robinhood.com";
 
 export interface RpcLog {
   address: string;
+  removed?: boolean;
+  blockHash?: string;
   blockNumber: string;
   transactionHash: string;
   logIndex: string;
@@ -19,6 +22,7 @@ export interface RpcLog {
 
 export interface LiveLaunch {
   token: string;
+  blockHash?: string;
   curve: string;
   deployer: string;
   pairToken: string;
@@ -50,7 +54,7 @@ function parseHexInteger(value: string): number | null {
 }
 
 export function decodeTokenLaunchedLog(log: RpcLog): LiveLaunch | null {
-  if (!log || typeof log.address !== "string" || typeof log.blockNumber !== "string" ||
+  if (!log || log.removed === true || typeof log.address !== "string" || typeof log.blockNumber !== "string" ||
       typeof log.transactionHash !== "string" || typeof log.logIndex !== "string" ||
       typeof log.data !== "string" || !Array.isArray(log.topics) ||
       !log.topics.every((topic) => typeof topic === "string")) return null;
@@ -68,6 +72,7 @@ export function decodeTokenLaunchedLog(log: RpcLog): LiveLaunch | null {
   if (!pairToken || blockNumber === null || logIndex === null || !/^0x[0-9a-fA-F]{64}$/.test(log.transactionHash)) return null;
   return {
     token,
+    ...(log.blockHash ? { blockHash: log.blockHash } : {}),
     curve,
     deployer,
     pairToken,
@@ -82,6 +87,7 @@ export function decodeTokenLaunchedLog(log: RpcLog): LiveLaunch | null {
 export type RpcCaller = (method: string, params?: unknown[]) => Promise<unknown>;
 
 export interface LiveLaunchDecision extends LiveLaunch {
+  chronology?: LaunchEvidence;
   verdict: "WATCH" | "VETO";
   pairLabel: "ETH" | "OTHER";
   market: PonsMarketState;
@@ -99,10 +105,35 @@ export interface LiveSnapshot {
   chainId: typeof ROBINHOOD_CHAIN_ID;
   headBlock: number;
   fetchedAt: string;
+  discoveredAt?: string;
+  normalizedAt?: string;
+  ingestedAt?: string;
   source: "Robinhood Chain RPC";
   mode: "read-only";
   historyWindowBlocks: number;
   launches: LiveLaunchDecision[];
+}
+
+/** Refresh a retained, verified LIVE launch outside the rolling latest-launch list. Read-only. */
+export async function refreshLiveLaunchAtHead(rpc: RpcCaller, launch: LiveLaunchDecision, headBlock: number): Promise<LiveLaunchDecision> {
+  const blockTag = `0x${headBlock.toString(16)}`;
+  const [header, research] = await Promise.all([
+    rpc("eth_getBlockByNumber", [blockTag, false]), readPonsLaunchResearch(rpc, [launch], blockTag)
+  ]);
+  const h = header as Record<string, unknown> | null, row = research[0];
+  if (!h || h.number !== blockTag || typeof h.hash !== "string" || !/^0x[0-9a-f]{64}$/i.test(h.hash) ||
+      typeof h.timestamp !== "string" || !/^0x[0-9a-f]+$/i.test(h.timestamp))
+    return { ...launch, market: row?.market ?? { status: "UNAVAILABLE", reason: "retained launch refresh unavailable" } };
+  const currentTimestamp = Number(BigInt(h.timestamp));
+  const chronology = launch.chronology;
+  const refreshedChronology = chronology ? { ...chronology, currentBlock: headBlock, currentTimestamp,
+    currentBlockHash: h.hash, tokenAgeSeconds: chronology.launchTimestamp === null ? null : currentTimestamp - chronology.launchTimestamp } : undefined;
+  if (!row || row.market.status !== "VERIFIED")
+    return { ...launch, market: row?.market ?? { status: "UNAVAILABLE", reason: "retained launch refresh unavailable" },
+      ...(refreshedChronology ? { chronology: refreshedChronology } : {}) };
+  const assessment = assessPonsLaunch(launch.pairLabel, row.market);
+  return { ...launch, market: row.market, metadata: row.metadata, assessment, verdict: assessment.verdict,
+    handoffs: liveHandoffs(launch, row.market, assessment), ...(refreshedChronology ? { chronology: refreshedChronology } : {}) };
 }
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
@@ -177,6 +208,7 @@ export async function fetchLiveSnapshot(rpc: RpcCaller, options: { blockWindow?:
     toBlock: headHex
   }]);
   if (!Array.isArray(rawLogs)) throw new Error("RPC returned invalid launch logs");
+  const discoveredAt = new Date().toISOString();
   const rawGraduations = await rpc("eth_getLogs", [{
     address: PONS_FACTORY,
     topics: [POOL_GRADUATED_TOPIC],
@@ -189,10 +221,14 @@ export async function fetchLiveSnapshot(rpc: RpcCaller, options: { blockWindow?:
     const token = addressFromTopic(log.topics[1] ?? "");
     return token ? [token] : [];
   }));
-  const allLaunches = rawLogs.filter(isRpcLog).map(decodeTokenLaunchedLog).filter((launch): launch is LiveLaunch => launch !== null)
+  const validDecodedLaunches = rawLogs.filter(isRpcLog).map(decodeTokenLaunchedLog).filter((launch): launch is LiveLaunch => launch !== null && launch.blockNumber >= fromBlock && launch.blockNumber <= headBlock);
+  const normalizedAt = new Date().toISOString();
+  const allLaunches = validDecodedLaunches
     .sort((a, b) => b.blockNumber - a.blockNumber || b.logIndex - a.logIndex);
   const decodedLaunches = allLaunches.slice(0, 24);
   const research = await readPonsLaunchResearch(rpc, decodedLaunches, headHex);
+  const ingestedAt = new Date().toISOString();
+  const chronology = await launchEvidence(rpc, headBlock, decodedLaunches, research.map(r => r.market), Date.parse(discoveredAt), Date.parse(normalizedAt), Date.parse(ingestedAt));
   const launches = decodedLaunches.map((launch, index): LiveLaunchDecision => {
     const market = research[index]?.market ?? { status: "UNAVAILABLE", reason: "market evidence missing" };
     const metadata = research[index]?.metadata ?? { status: "UNAVAILABLE", reason: "token metadata missing" };
@@ -202,6 +238,7 @@ export async function fetchLiveSnapshot(rpc: RpcCaller, options: { blockWindow?:
       (candidate.blockNumber < launch.blockNumber || (candidate.blockNumber === launch.blockNumber && candidate.logIndex < launch.logIndex)));
     return {
       ...launch,
+      chronology: chronology[index]!,
       pairLabel,
       market,
       metadata,
@@ -218,7 +255,10 @@ export async function fetchLiveSnapshot(rpc: RpcCaller, options: { blockWindow?:
   return {
     chainId: ROBINHOOD_CHAIN_ID,
     headBlock,
-    fetchedAt: new Date().toISOString(),
+    fetchedAt: ingestedAt,
+    discoveredAt,
+    normalizedAt,
+    ingestedAt,
     source: "Robinhood Chain RPC",
     mode: "read-only",
     historyWindowBlocks: requestedWindow,

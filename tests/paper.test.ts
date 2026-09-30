@@ -1,3 +1,5 @@
+import { enterPaper } from "./liquidity-history-fixture.js";
+import { chronology } from "./paper-fixtures.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
@@ -6,7 +8,7 @@ import { join } from "node:path";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { AGENTS } from "../src/simulation.js";
-import { PAPER_CONFIG, accountSummary, enterPaper, initialPaperState, isPaperTradeEligible, markPaperPosition, monitorPaper, performance, quoteProblem, type Candidate, type PaperQuote, type QuoteResult } from "../src/paper.js";
+import {  PAPER_CONFIG, accountSummary, initialPaperState, isPaperTradeEligible, markPaperPosition, monitorPaper, performance, quoteProblem, type Candidate, type PaperQuote, type QuoteResult  } from "../src/paper.js";
 import { PaperStore, validatePaperState } from "../src/paper-store.js";
 import { createDeskServer } from "../src/server.js";
 
@@ -15,11 +17,22 @@ const token = "0x1111111111111111111111111111111111111111";
 // Explicit test fixtures only. Production never imports these approvals or prices.
 function quote(price = 1, side: "BUY" | "SELL" = "BUY", quantity = 10): PaperQuote {
   return { tokenAddress: token, side, timestamp: new Date(now).toISOString(), blockTimestamp: new Date(now).toISOString(), source: "TEST FIXTURE ONLY",
+    tokenUnits: String(BigInt(quantity) * 10n ** 18n),
+    evidence: { model: "PONS_V2_CURVE", chainId: 4663, curve: `0x${"2".repeat(40)}`, blockHash: `0x${"b".repeat(64)}`,
+      ethUsd: 2000, usdTimestamp: new Date(now).toISOString(), usdSource: "TEST", tokenDecimals: 18,
+      quoteReserve: "1000000000000000000", tokenReserve: "1000000000000000000000", realQuoteReserve: "1000000000000000000",
+      feeBps: 0, creatorTaxBps: 0, snipeTaxBps: 0, progressBps: 1000,
+      amountIn: side === "SELL" ? String(BigInt(quantity) * 10n ** 18n) : "1",
+      amountOut: side === "BUY" ? String(BigInt(quantity) * 10n ** 18n) : "1", quoteAsset: "ETH",
+      feeWei: "0", creatorTaxWei: "0", snipeTaxWei: "0", modelSource: "TEST" },
     blockNumber: 1, rawPriceUsd: price, fillPriceUsd: price, quantity, notionalUsd: price * quantity, liquidityUsd: 1000,
     costs: { feesUsd: null, slippageUsd: null, gasUsd: null, priceImpactPercent: 0 } };
 }
 function candidate(q = quote()): Candidate {
-  return { tokenAddress: token, name: "TEST ONLY", symbol: "TEST", launchId: "test-launch", decision: "WATCH", evidenceComplete: true,
+  q.roundTrip = { sell: { ...structuredClone(q), side: "SELL", costs: { ...q.costs, gasUsd: null } }, entryUsd: q.notionalUsd, immediateExitUsd: q.notionalUsd, lossUsd: 0, lossPercent: 0, knownFeesUsd: null };
+  q.roundTrip.sell.evidence!.amountOut = q.evidence!.amountIn;
+  q.roundTrip.sell.evidence!.amountIn = q.tokenUnits!;
+  return { ...chronology(now), tokenAddress: token, name: "TEST ONLY", symbol: "TEST", launchId: "test-launch", decision: "WATCH", evidenceComplete: true,
     handoffs: AGENTS.map((agent, i) => ({ sequence: i + 1, timestamp: new Date(now).toISOString(), agent: agent.name, role: agent.role, outcome: "PASS", message: "TEST ONLY" })),
     quote: { status: "AVAILABLE", quote: q } };
 }
@@ -85,8 +98,8 @@ test("daily realized loss is gross losses in UTC, blocks entries but resets next
   const s = initialPaperState(now);
   for (let i = 0; i < 6; i++) { const c = candidate(); c.launchId = `loss-${i}`; enterPaper(s, c, 10, now); await closeAt(s, .1); }
   assert.equal(enterPaper(s, candidate(), 10, now).reason, "DAILY_LOSS_LIMIT");
-  const q = quote(); q.timestamp = q.blockTimestamp = new Date(now + 86_400_000).toISOString();
-  assert.equal(enterPaper(s, candidate(q), 10, now + 86_400_000).outcome, "PAPER_BUY");
+  const q = quote(); q.timestamp = q.blockTimestamp = new Date(now + 86_400_000).toISOString(); q.evidence!.usdTimestamp = q.timestamp;
+  assert.equal(enterPaper(s, { ...candidate(q), ...chronology(now + 86_400_000) }, 10, now + 86_400_000).outcome, "PAPER_BUY");
 });
 for (const price of [0, -1, NaN, Infinity]) {
   test(`invalid quote price ${price} cannot enter or cause zero exit`, () => {
@@ -104,7 +117,7 @@ test("stale block, stale quote, future timestamp and malformed date cannot enter
 });
 test("missing quote, RPC failure and stale exit preserve positions and last-known valuation", async () => {
   const s = initialPaperState(now); const c = candidate(); c.quote = missing;
-  assert.equal(enterPaper(s, c, 10, now).outcome, "NOT_TRADABLE");
+  assert.equal(enterPaper(s, c, 10, now).outcome, "PAPER_REJECT");
   enterPaper(s, candidate(), 10, now);
   await monitorPaper(s, async () => { throw new Error("RPC failure"); }, () => now);
   assert.equal(s.positions[0]?.markReason, "QUOTE_UNAVAILABLE");
@@ -124,6 +137,7 @@ test("WATCH needs the completed chain and quote; VETO or incomplete evidence can
 });
 test("mismatched quote direction, address, size and exit quantity are rejected", () => {
   const s = initialPaperState(now); const q = quote(); q.side = "SELL";
+  q.evidence!.amountIn = q.tokenUnits!;
   assert.equal(enterPaper(s, candidate(q), 10, now).reason, "QUOTE_MISMATCH");
   q.side = "BUY"; q.tokenAddress = `0x${"a".repeat(40)}`;
   assert.equal(enterPaper(s, candidate(q), 10, now).reason, "QUOTE_MISMATCH");
@@ -161,16 +175,50 @@ test("corrupt storage fails closed, and failed transactions do not alter the acc
   await assert.rejects(store.update(s => { s.cash = NaN; })); assert.equal(store.read().cash, 1000); await store.close();
   await writeFile(join(directory, "state.json"), "{}"); await assert.rejects(PaperStore.open(directory), /Invalid paper state/);
 });
-test("PAPER route and API serialize actual persisted account; mutation APIs are absent", async t => {
+test("PAPER route serializes the persisted account and the base account endpoint stays read-only", async t => {
   const directory = await mkdtemp(join(tmpdir(), "paper-api-"));
   const server = createDeskServer({ paperDirectory: directory, paperUsdFetch: (async () => { throw new Error("offline USD test"); }) as typeof fetch, rpc: async () => { throw new Error("offline test"); } });
   server.listen(0, "127.0.0.1"); await once(server, "listening"); t.after(() => server.close());
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const html = await (await fetch(`${base}/paper`)).text();
-  for (const label of ["PAPER MODE", "SIMULATED EXECUTION", "NO REAL MONEY", "BALANCE HISTORY"]) assert.match(html, new RegExp(label));
+  for (const label of ["PAPER MODE", "SIMULATED EXECUTION", "NO REAL MONEY", "BALANCE HISTORY", "RESET ACCOUNT \\+ CLEAR HISTORY", "MAXIMUM OPEN TRADES"]) assert.match(html, new RegExp(label));
   const data = await (await fetch(`${base}/api/paper`)).json() as { mode: string; account: { equity: number }; trades: unknown[] };
   assert.equal(data.mode, "PAPER"); assert.equal(data.account.equity, 1000); assert.equal(data.trades.length, 0);
   assert.equal((await fetch(`${base}/api/paper`, { method: "POST" })).status, 405);
+});
+
+test("paper controls update the open-trade limit and reset visible account history to chosen equity", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "paper-controls-"));
+  const seeded = await PaperStore.open(directory);
+  await seeded.update(state => {
+    enterPaper(state, candidate(), 10, now);
+    state.history.push({ timestamp: new Date(now + 1000).toISOString(), equity: 1000, stalePositions: 0 });
+    state.events.push({ timestamp: new Date(now).toISOString(), category: "PAPER", stage: "PAPER", tokenAddress: token,
+      tokenSymbol: "TEST", eventType: "TEST_HISTORY", message: "test only", metadata: {} });
+  });
+  await seeded.close();
+  const server = createDeskServer({ paperDirectory: directory, paperUsdFetch: (async () => { throw new Error("offline USD test"); }) as typeof fetch,
+    rpc: async () => { throw new Error("offline test"); } });
+  server.listen(0, "127.0.0.1"); await once(server, "listening"); t.after(() => server.close());
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const update = (path: string, body: unknown, origin = base) => fetch(`${base}${path}`, {
+    method: "POST", headers: { origin, "content-type": "application/json" }, body: JSON.stringify(body)
+  });
+  assert.equal((await update("/api/paper/settings", { maxOpenTrades: 4 }, "http://attacker.invalid")).status, 403);
+  const settings = await update("/api/paper/settings", { maxOpenTrades: 4 });
+  assert.equal(settings.status, 200);
+  const configured = await settings.json() as { config: { MAX_OPEN_POSITIONS: number }; positions: unknown[] };
+  assert.equal(configured.config.MAX_OPEN_POSITIONS, 4);
+  assert.equal(configured.positions.length, 1);
+  const reset = await update("/api/paper/reset", { startingBalanceUsd: 2500 });
+  assert.equal(reset.status, 200);
+  const cleared = await reset.json() as { account: { equity: number; startingBalance: number }; config: { MAX_OPEN_POSITIONS: number }; positions: unknown[]; trades: unknown[]; history: unknown[] };
+  assert.equal(cleared.account.equity, 2500);
+  assert.equal(cleared.account.startingBalance, 2500);
+  assert.equal(cleared.config.MAX_OPEN_POSITIONS, 4);
+  assert.equal(cleared.positions.length, 0);
+  assert.equal(cleared.trades.length, 0);
+  assert.equal(cleared.history.length, 1);
 });
 
 test("malformed quote shape is rejected without throwing", () => {
@@ -220,6 +268,7 @@ test("live adapter preserves WATCH semantics and never fabricates an executable 
   assert.equal(state.events.filter(e => e.category === "RESEARCH").length, 10);
   const positioned = initialPaperState(now); enterPaper(positioned, candidate(), 10, now);
   positioned.positions[0]!.candidate.launch = launch;
+  delete positioned.positions[0]!.entry.tokenUnits;
   const result = await readPaperExitQuote(async () => { throw new Error("must not read without exact quantity"); }, positioned.positions[0]!);
   assert.equal(result.status, "NOT_PAPER_TRADABLE");
   if (result.status === "NOT_PAPER_TRADABLE") assert.equal(result.reason, "MISSING_EXACT_TOKEN_UNITS");

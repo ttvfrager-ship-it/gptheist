@@ -1,3 +1,4 @@
+import { unknownLaunchEvidence } from "./launch-evidence.js";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { open, rename, unlink } from "node:fs/promises";
@@ -75,8 +76,32 @@ export class PaperStore {
       let state: PaperState;
       try {
         const text = await readSafe(resolve(root, "state.json"));
-        const raw = JSON.parse(text) as { schemaVersion?: number };
-        if (raw.schemaVersion === 1) {
+        const raw = JSON.parse(text) as PaperState;
+        if (raw?.config) { for (const [key, value] of Object.entries(PAPER_CONFIG)) raw.config[key as keyof typeof PAPER_CONFIG] ??= value; }
+        raw.lastObservedHeadBlock ??= null;
+        raw.tractionHistory ??= {};
+        raw.tractionWatchlist ??= {};
+        // Older PAPER files retained LIVE decisions but not the head/watchlist fields.
+        // Recover only their provenance and last observed head; never synthesize traction samples.
+        const retained = new Map<string, PaperState["decisions"][number]["candidate"]>();
+        for (const decision of raw.decisions ?? []) if (decision.candidate?.eventMode === "LIVE" && decision.candidate.launch)
+          retained.set(decision.candidate.launchId, decision.candidate);
+        raw.lastObservedHeadBlock = Math.max(raw.lastObservedHeadBlock ?? 0,
+          ...[...retained.values()].map(candidate => candidate.currentBlock ?? 0)) || null;
+        raw.researchLedger ??= {};
+        for (const [id, candidate] of retained) {
+          const observedAt = raw.lastSnapshotAt ?? (candidate.launchTimestamp === null ? new Date().toISOString() : new Date(candidate.launchTimestamp * 1000).toISOString());
+          const row = raw.researchLedger[id] ??= { firstObservedAt: observedAt, lastObservedAt: observedAt, observations: 1,
+            lastResult: null, traded: false };
+          row.sourceEventId ??= candidate.sourceEventId ?? id;
+          row.eventMode ??= "LIVE";
+          row.classificationReason ??= "RECOVERED_PERSISTED_LIVE_DECISION";
+          const alreadyPositioned = raw.positions.some(position => position.launchId === id) || raw.trades.some(trade => trade.launchId === id);
+          const age = candidate.launchTimestamp === null ? Infinity : Date.now() / 1000 - candidate.launchTimestamp;
+          if (candidate.launch && candidate.decision === "WATCH" && !alreadyPositioned && age >= 0 && age <= (raw.config?.PAPER_MAX_LAUNCH_AGE_SECONDS ?? PAPER_CONFIG.PAPER_MAX_LAUNCH_AGE_SECONDS))
+            raw.tractionWatchlist[id] ??= candidate.launch;
+        }
+        if (Number(raw.schemaVersion) === 1) {
           state = migratePaperState(raw);
           validatePaperState(state);
           const backup = await open(resolve(root, `schema-v1-backup-${Date.now()}.json`), "wx", 0o600);
@@ -84,6 +109,22 @@ export class PaperStore {
         } else { validatePaperState(raw); state = raw; }
       }
       catch (error) { if (code(error) !== "ENOENT") throw error; state = initialPaperState(); }
+      for (const c of [...state.decisions.map(d => d.candidate), ...state.positions.map(p => p.candidate), ...state.trades.map(t => t.candidate)]) {
+        if (c.launchTimestamp === undefined) Object.assign(c, unknownLaunchEvidence(c.launch?.blockNumber ?? 0));
+      }
+      if (process.env.PAPER_MAX_LAUNCH_AGE_SECONDS !== undefined) {
+        state.config.PAPER_MAX_LAUNCH_AGE_SECONDS = Number(process.env.PAPER_MAX_LAUNCH_AGE_SECONDS);
+        initialPaperState(Date.now(), state.config);
+      }
+      if (process.env.PAPER_QUOTE_REFRESH_MS !== undefined) {
+        const interval = Number(process.env.PAPER_QUOTE_REFRESH_MS);
+        if (!Number.isFinite(interval) || interval < 1000) throw new Error("PAPER_QUOTE_REFRESH_MS must be at least 1000");
+        state.config.PAPER_QUOTE_REFRESH_MS = interval;
+      }
+      for (const key of ["MIN_REAL_EXIT_RESERVE_ETH", "MIN_EXIT_COVERAGE_RATIO", "MAX_EXIT_PARTICIPATION_BPS", "LIQUIDITY_OBSERVATION_COUNT", "LIQUIDITY_OBSERVATION_MIN_MS", "LIQUIDITY_OBSERVATION_WINDOW_MS", "MAX_LIQUIDITY_DROP_PERCENT"] as const) {
+        if (process.env[key] !== undefined) state.config[key] = Number(process.env[key]);
+      }
+      initialPaperState(Date.now(), state.config);
       const store = new PaperStore(root, state); await store.write(state); return store;
     } catch (error) { await unlink(lock); throw error; }
   }
@@ -110,11 +151,25 @@ export class PaperStore {
     const work = this.tail.then(async () => { const next = this.read(); await fn(next); await this.write(next); this.state = next; });
     this.tail = work.catch(() => undefined); return work;
   }
-  async reset(): Promise<void> {
+  async setMaxOpenPositions(maxOpenPositions: number): Promise<void> {
+    await this.update(state => {
+      if (!Number.isInteger(maxOpenPositions) || maxOpenPositions < 1 || maxOpenPositions > 100) throw new RangeError("Maximum open trades must be an integer from 1 to 100");
+      if (maxOpenPositions < state.positions.length) throw new Error("Maximum open trades cannot be lower than the current open position count");
+      state.config.MAX_OPEN_POSITIONS = maxOpenPositions;
+      initialPaperState(Date.now(), state.config);
+      state.events.push({ timestamp: new Date().toISOString(), category: "SYSTEM", stage: "PAPER", tokenAddress: null, tokenSymbol: null,
+        eventType: "OPEN_TRADE_LIMIT_UPDATED", message: `Maximum open trades set to ${maxOpenPositions}`, metadata: { maxOpenPositions } });
+    });
+  }
+  async reset(settings: { startingBalanceUsd?: number } = {}): Promise<void> {
     await this.update(async state => {
+      const startingBalanceUsd = settings.startingBalanceUsd ?? state.config.STARTING_BALANCE_USD;
+      if (!Number.isFinite(startingBalanceUsd) || startingBalanceUsd < 1 || startingBalanceUsd > 1_000_000_000) throw new RangeError("Starting equity must be between $1 and $1,000,000,000");
+      const config = { ...state.config, STARTING_BALANCE_USD: startingBalanceUsd };
+      initialPaperState(Date.now(), config);
       const backup = await open(resolve(this.directory, `reset-backup-${Date.now()}.json`), "wx", 0o600);
       try { await backup.writeFile(JSON.stringify(state)); await backup.sync(); } finally { await backup.close(); }
-      Object.assign(state, initialPaperState());
+      Object.assign(state, initialPaperState(Date.now(), config));
     });
   }
   async close(): Promise<void> { await this.tail; await unlink(resolve(this.directory, "writer.lock")); }

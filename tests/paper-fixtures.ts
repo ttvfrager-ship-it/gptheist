@@ -13,10 +13,17 @@ const deployer = `0x${"3".repeat(40)}`;
 const zero = `0x${"0".repeat(40)}`;
 const eth = 10n ** 18n;
 
+export function chronology(time: number) {
+  return { launchBlock: 1, launchTimestamp: Math.floor(time / 1000), currentBlock: 2,
+    currentTimestamp: Math.floor(time / 1000), tokenAgeSeconds: 0, firstBlockSeenByProcess: 2,
+    eventMode: "LIVE" as const, launchBlockHash: `0x${"a".repeat(64)}`, currentBlockHash: `0x${"b".repeat(64)}`,
+    recentTraction: { status: "VERIFIED" as const, progressChangeBps: 1, reserveChangeWei: "1", toTimestamp: Math.floor(time / 1000), lastVerifiedActivityTime: null, explanation: "TEST" } };
+}
 export function fixture() {
   const time = Date.now();
   const stamp = new Date(time).toISOString();
   const launch: LiveLaunchDecision = {
+    chronology: chronology(time),
     token, curve, deployer, pairToken: zero, launchConfigId: "0", graduationThreshold: (2n * eth).toString(),
     blockNumber: 1, transactionHash: `0x${"a".repeat(64)}`, logIndex: 0, verdict: "WATCH", pairLabel: "ETH",
     market: { status: "VERIFIED", creatorFeeRecipient: deployer, creatorTaxBps: 100, buybackEnabled: false, phase: "CURVE",
@@ -29,20 +36,20 @@ export function fixture() {
     deployerResearch: { windowBlocks: 100, priorLaunches: 0, priorGraduations: 0 }
   };
   const state = { reserve: 2n * eth, real: eth, sellable: 500_000n * eth, fee: 100n, snipe: 0n,
-    phase: 0, ready: false, graduated: false, decimals: 18, identity: token, fail: false, reorg: false,
-    blockTime: Math.floor(time / 1000), headerReads: 0, chain: "0x1237", usd: { bid: 2000, ask: 2000, timestamp: stamp, source: "TEST ETH/USD" } as UsdRate };
+    phase: 0, ready: false, graduated: false, decimals: 18, supply: 1_000_000_000n * eth as bigint | null, identity: token, fail: false, reorg: false,
+    headBlock: 2, blockTime: Math.floor(time / 1000), headerReads: 0, chain: "0x1237", usd: { bid: 2000, ask: 2000, timestamp: stamp, source: "TEST ETH/USD" } as UsdRate };
   const methods: string[] = [];
   const rpc: RpcCaller = async (method, params) => {
     methods.push(method);
     if (state.fail) throw new Error("TEST RPC outage");
     if (method === "eth_chainId") return state.chain;
-    if (method === "eth_blockNumber") return "0x2";
+    if (method === "eth_blockNumber") return `0x${state.headBlock.toString(16)}`;
     if (method === "eth_getBlockByNumber") {
       state.headerReads++;
-      return { number: "0x2", hash: `0x${(state.reorg && state.headerReads % 2 === 0 ? "c" : "b").repeat(64)}`, timestamp: `0x${state.blockTime.toString(16)}` };
+      return { number: `0x${state.headBlock.toString(16)}`, hash: `0x${(state.reorg && state.headerReads % 2 === 0 ? "c" : "b").repeat(64)}`, timestamp: `0x${state.blockTime.toString(16)}` };
     }
     assert.equal(method, "eth_call", "Only read-only calls are allowed");
-    assert.equal(params?.[1], "0x2", "Every read is pinned");
+    assert.equal(params?.[1], `0x${state.headBlock.toString(16)}`, "Every read is pinned");
     const call = params![0] as { data: Hex };
     const decoded = decodeFunctionData({ abi, data: call.data });
     const results = decoded.args[0].map(c => {
@@ -54,7 +61,7 @@ export function fixture() {
       if (selector === PONS_SELECTORS.currentSnipeTaxBps) result = data(state.snipe);
       const reads: Record<string, bigint | number | string> = {
         "feeBps()": state.fee, "sellableTokens()": state.sellable, "graduated()": Number(state.graduated),
-        "readyToGraduate()": Number(state.ready), "token()": state.identity, "factory()": PONS_FACTORY, "pairToken()": zero, "decimals()": state.decimals
+        "readyToGraduate()": Number(state.ready), "token()": state.identity, "factory()": PONS_FACTORY, "pairToken()": zero, "decimals()": state.decimals, ...(state.supply === null ? {} : { "totalSupply()": state.supply })
       };
       for (const [signature, value] of Object.entries(reads)) if (selector === toFunctionSelector(signature)) result = data(value);
       return { success: result !== undefined, returnData: result ?? "0x" as Hex };

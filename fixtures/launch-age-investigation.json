@@ -1,0 +1,143 @@
+{
+  "currentBlock": 74320540,
+  "currentTimestamp": 1790550537,
+  "currentHash": "0x304597b7414953e09f8e866fd85361badebdb81ce6eecbf905e6bb595508d223",
+  "tokens": [
+    {
+      "symbol": "NETWORK",
+      "address": "0x16ff148dbc95a7c4160149cf0e68d6f2ea8164ac",
+      "launchBlock": 73242773,
+      "launchTimestamp": 1790441774,
+      "launchHash": "0xf14408be5ef3e9e9822a635181126be01b667f5cac5ce5450c6bbc4b4b4c144e",
+      "event": {
+        "token": "0x16ff148dbc95a7c4160149cf0e68d6f2ea8164ac",
+        "curve": "0xc6f40f2163c8e6a558c13b8d8ec62402c7127460",
+        "deployer": "0xbfe030bd89e731f9c001513a7cddc559144be261",
+        "pairToken": "0x0000000000000000000000000000000000000000",
+        "launchConfigId": "0",
+        "graduationThreshold": "4200000000000000000",
+        "blockNumber": 73242773,
+        "transactionHash": "0x2a90e3617e2d48d8c8b53dc4e28363571fca02621d4b331072c3406eebc213bf",
+        "logIndex": 44
+      },
+      "ageSeconds": 108763,
+      "entry": "2026-09-26T16:56:42.206Z",
+      "lastDecision": null,
+      "firstObserved": {
+        "file": "audit-archive-1790450051528-a1668682-c60d-49c6-9efb-f1ab7ed8d48d.json",
+        "timestamp": "2026-09-26T16:56:37.106Z",
+        "block": 73242991,
+        "message": "Detected Pons v2 launch in block 73242773."
+      },
+      "activity": {
+        "symbol": "NETWORK",
+        "address": "0x16ff148dbc95a7c4160149cf0e68d6f2ea8164ac",
+        "fromBlock": 74319540,
+        "fromTimestamp": 1790550437,
+        "toBlock": 74320540,
+        "toTimestamp": 1790550537,
+        "before": {
+          "status": "VERIFIED",
+          "creatorFeeRecipient": "0xbfe030bd89e731f9c001513a7cddc559144be261",
+          "creatorTaxBps": 200,
+          "buybackEnabled": false,
+          "phase": "CURVE",
+          "quoteReserve": "1680000000016344081",
+          "tokenReserve": "999999999990271380372597917",
+          "realQuoteReserve": "16344081",
+          "graduationThreshold": "4200000000000000000",
+          "progressBps": 0,
+          "currentSnipeTaxBps": 0
+        },
+        "after": {
+          "status": "VERIFIED",
+          "creatorFeeRecipient": "0xbfe030bd89e731f9c001513a7cddc559144be261",
+          "creatorTaxBps": 200,
+          "buybackEnabled": false,
+          "phase": "CURVE",
+          "quoteReserve": "1680000000016344081",
+          "tokenReserve": "999999999990271380372597917",
+          "realQuoteReserve": "16344081",
+          "graduationThreshold": "4200000000000000000",
+          "progressBps": 0,
+          "currentSnipeTaxBps": 0
+        },
+        "policy": {
+          "outcome": "PAPER_REJECT",
+          "reason": "STALE_LAUNCH",
+          "details": []
+        },
+        "positionsOpened": 0,
+        "lastVerifiedActivityTime": null
+      }
+    },
+    {
+      "symbol": "AVM",
+      "address": "0x6f48538fc1b79af9e7f56890e0da0582d763a272",
+      "launchBlock": 74316450,
+      "launchTimestamp": 1790550126,
+      "launchHash": "0x44bee22e54d44646ba258a32d3946038d03daa06fb35ad93dfa9da4298db80da",
+      "event": {
+        "token": "0x6f48538fc1b79af9e7f56890e0da0582d763a272",
+        "curve": "0xaed486d318ffd9e02fda0aeae42de624b4c2e519",
+        "deployer": "0x79aaec2e3456d08c058f4a9c1292b653648393ac",
+        "pairToken": "0x0000000000000000000000000000000000000000",
+        "launchConfigId": "0",
+        "graduationThreshold": "4200000000000000000",
+        "blockNumber": 74316450,
+        "transactionHash": "0xf20952ef0a3e87d5c76884c86dfc2dcba861429afe944b5d8f3080ea79180eb1",
+        "logIndex": 48
+      },
+      "ageSeconds": 411,
+      "entry": null,
+      "lastDecision": "2026-09-27T23:08:56.834Z",
+      "firstObserved": {
+        "file": "audit-archive-1790550294096-5afd0bda-46b6-4015-8b45-18ea23d724d1.json",
+        "timestamp": "2026-09-27T23:02:20.937Z",
+        "block": 74316587,
+        "message": "Detected Pons v2 launch in block 74316450."
+      },
+      "activity": {
+        "symbol": "AVM",
+        "address": "0x6f48538fc1b79af9e7f56890e0da0582d763a272",
+        "fromBlock": 74319540,
+        "fromTimestamp": 1790550437,
+        "toBlock": 74320540,
+        "toTimestamp": 1790550537,
+        "before": {
+          "status": "VERIFIED",
+          "creatorFeeRecipient": "0x79aaec2e3456d08c058f4a9c1292b653648393ac",
+          "creatorTaxBps": 200,
+          "buybackEnabled": false,
+          "phase": "CURVE",
+          "quoteReserve": "4531510070740374220",
+          "tokenReserve": "370737342248809268150362926",
+          "realQuoteReserve": "2851510070740374220",
+          "graduationThreshold": "4200000000000000000",
+          "progressBps": 6789,
+          "currentSnipeTaxBps": 0
+        },
+        "after": {
+          "status": "VERIFIED",
+          "creatorFeeRecipient": "0x79aaec2e3456d08c058f4a9c1292b653648393ac",
+          "creatorTaxBps": 200,
+          "buybackEnabled": false,
+          "phase": "CURVE",
+          "quoteReserve": "5140785999681205877",
+          "tokenReserve": "326798275614698101440670515",
+          "realQuoteReserve": "3460785999681205877",
+          "graduationThreshold": "4200000000000000000",
+          "progressBps": 8239,
+          "currentSnipeTaxBps": 0
+        },
+        "policy": {
+          "outcome": "PAPER_REJECT",
+          "reason": "STALE_LAUNCH",
+          "details": []
+        },
+        "positionsOpened": 0,
+        "lastVerifiedActivityTime": null
+      }
+    }
+  ]
+}

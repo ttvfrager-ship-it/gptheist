@@ -8,6 +8,22 @@ import { PaperQuoteService } from "./paper-quotes.js";
 import { PaperStore } from "./paper-store.js";
 import { PaperService } from "./paper-service.js";
 
+async function readJsonBody(request: import("node:http").IncomingMessage): Promise<unknown> {
+  let body = "";
+  for await (const chunk of request) {
+    body += chunk;
+    if (body.length > 4096) throw new RangeError("Request body is too large");
+  }
+  return JSON.parse(body);
+}
+
+function isSameOrigin(request: import("node:http").IncomingMessage): boolean {
+  const origin = request.headers.origin;
+  const host = request.headers.host;
+  if (!origin || !host || request.headers["sec-fetch-site"] === "cross-site") return false;
+  try { return new URL(origin).host === host; } catch { return false; }
+}
+
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const DEFAULT_ASSETS = resolve(projectRoot, "assets/desk");
 const SECURITY_HEADERS = {
@@ -55,9 +71,9 @@ export function createHttpRpcCaller(url?: string, options: RpcCallerOptions = {}
       if (!endpoint) break;
       const now = Date.now();
       const minimumStart = Math.max(lastRequestAt + 80, method === "eth_getLogs" ? lastLogsAt + 500 : 0);
-      if (minimumStart > now) await sleep(minimumStart - now);
-      lastRequestAt = Date.now();
+      lastRequestAt = Math.max(minimumStart, now);
       if (method === "eth_getLogs") lastLogsAt = lastRequestAt;
+      if (minimumStart > now) await sleep(minimumStart - now);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 12_000);
       try {
@@ -130,7 +146,7 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
   const paperReady = options.paperDirectory ? PaperStore.open(options.paperDirectory).then(store => {
     const quotes = new PaperQuoteService(rpc, store.read().config, options.paperUsdFetch);
     paper = new PaperService(store, snapshot, position => quotes.sell(position),
-      (launch, sizeUsd) => quotes.buy(launch, sizeUsd), quotes); paper.start();
+      (launch, sizeUsd) => quotes.buy(launch, sizeUsd), quotes, Date.now, rpc); paper.start();
   }).catch((error: unknown) => { paperError = error instanceof Error ? error.message : "Paper storage unavailable"; }) : Promise.resolve();
   const assets: Record<string, [string, string]> = {
     "/paper": ["paper.html", "text/html; charset=utf-8"],
@@ -151,6 +167,43 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
     try {
       const requestUrl = new URL(request.url ?? "/", "http://localhost");
       const path = requestUrl.pathname;
+      if (path === "/api/paper/settings" || path === "/api/paper/reset") {
+        await paperReady;
+        if (!paper) { send(response, 503, "application/json; charset=utf-8", JSON.stringify({ error: paperError ?? "Paper service not configured" })); return; }
+        if (request.method !== "POST") { send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" })); return; }
+        if (!isSameOrigin(request)) { send(response, 403, "application/json; charset=utf-8", JSON.stringify({ error: "same-origin request required" })); return; }
+        if (!request.headers["content-type"]?.toLowerCase().startsWith("application/json")) {
+          send(response, 415, "application/json; charset=utf-8", JSON.stringify({ error: "application/json required" })); return;
+        }
+        let body: unknown;
+        try { body = await readJsonBody(request); }
+        catch (error) {
+          const status = error instanceof RangeError ? 413 : 400;
+          send(response, status, "application/json; charset=utf-8", JSON.stringify({ error: error instanceof Error ? error.message : "invalid JSON" })); return;
+        }
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          send(response, 400, "application/json; charset=utf-8", JSON.stringify({ error: "invalid request body" })); return;
+        }
+        const values = body as Record<string, unknown>;
+        try {
+          if (path === "/api/paper/settings") {
+            if (Object.keys(values).length !== 1 || typeof values.maxOpenTrades !== "number" || !Number.isInteger(values.maxOpenTrades) || values.maxOpenTrades < 1 || values.maxOpenTrades > 100) {
+              send(response, 400, "application/json; charset=utf-8", JSON.stringify({ error: "maxOpenTrades must be an integer from 1 to 100" })); return;
+            }
+            await paper.setMaxOpenPositions(values.maxOpenTrades);
+          } else {
+            if (Object.keys(values).length !== 1 || typeof values.startingBalanceUsd !== "number" || !Number.isFinite(values.startingBalanceUsd) || values.startingBalanceUsd < 1 || values.startingBalanceUsd > 1_000_000_000) {
+              send(response, 400, "application/json; charset=utf-8", JSON.stringify({ error: "startingBalanceUsd must be between 1 and 1000000000" })); return;
+            }
+            await paper.resetAccount(values.startingBalanceUsd);
+          }
+          send(response, 200, "application/json; charset=utf-8", JSON.stringify(paper.view()));
+        } catch (error) {
+          const status = error instanceof RangeError ? 400 : 409;
+          send(response, status, "application/json; charset=utf-8", JSON.stringify({ error: error instanceof Error ? error.message : "paper account update failed" }));
+        }
+        return;
+      }
       if (request.method !== "GET") {
         send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" }));
         return;
