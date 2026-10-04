@@ -259,3 +259,31 @@ strategy-performance comparison. Laboratory settings do not modify the primary p
 
 See [the reliability audit](PAPER_ENGINE_AUDIT.md) for numerical live examples,
 contract-event cross-checks, test results, and remaining verification limitations.
+
+**Entry curve FDV:** the paper tables display derived fully diluted valuation: decimal-normalized total token supply × pinned pre-buy curve reserve-ratio price. Pricing reserves include virtual reserves. This is separate from real ETH liquidity and full-position executable liquidation value; it is not a verified Pons displayed market cap. New quotes store `derivedFdvUsd`, `valuationBasis`, and raw/formatted supply. Older saved `marketCapUsd` values remain intact and are displayed as legacy curve FDV.
+
+**Faster discovery and terminal activity:** `npm run desk` prints scan duration,
+entry decisions and rejection reasons, simulated buys/sells and realized P&L.
+Discovery defaults to a 4-second cadence measured from cycle start; slow cycles
+never overlap. Position monitoring runs alongside discovery. Set
+`PAPER_DISCOVERY_INTERVAL_MS` (minimum 1000) to change discovery cadence;
+`PAPER_QUOTE_REFRESH_MS` independently controls exit quote refresh. For example:
+
+```bash
+PAPER_DISCOVERY_INTERVAL_MS=2000 PAPER_QUOTE_REFRESH_MS=2000 npm run desk
+```
+
+RPC latency, snapshot caching and rate limits still affect observed timing.
+Fresh-launch, traction, liquidity and risk checks still apply. All fills are simulated.
+
+The [paper entry pipeline improvements](SNIPING_IMPROVEMENTS.md) collect exit
+liquidity evidence during inflow confirmation, size within full-exit coverage,
+prioritize newer launches, and show current entry blockers on `/paper`. Faster
+polling uses time-spaced momentum samples; cached snapshots do not repeat entry
+work. These changes address missed-entry delays without claiming a profitable edge.
+
+For the experimental higher-activity paper profile, use `PAPER_STRATEGY_MODE=SCALP`.
+It qualifies earlier verified inflows, limits each token to 0.25% of equity, targets
+3% net profit, and caps holding time at 90 seconds. `STRICT` retains v3 selection.
+The dashboard tracks scalp v4 separately and preserves lifetime results. See the
+[scalp rules and recorded-quote results](PAPER_SCALP.md); profitability is unproven.

@@ -85,7 +85,8 @@ test("portfolio exposure, cash reserve, per-position caps and known gas constrai
   assert.equal(isPaperTradeEligible(over, initialPaperState(f.time), 21, f.time).reason, "MAX_POSITION_EXPOSURE");
   const gas = liveCandidate(f.launch); gas.quote = await f.buy(10);
   if (gas.quote.status === "AVAILABLE") gas.quote.quote.costs.gasUsd = 1001;
-  assert.equal(isPaperTradeEligible(gas, initialPaperState(f.time), 10, f.time).reason, "INSUFFICIENT_PAPER_CASH");
+  // Gas now counts toward cost-basis exposure, which is checked before cash.
+  assert.equal(isPaperTradeEligible(gas, initialPaperState(f.time), 10, f.time).reason, "MAX_POSITION_EXPOSURE");
 });
 
 test("new entries are denied for VETO, unsupported pairs, duplicates, max positions and daily loss", async () => {

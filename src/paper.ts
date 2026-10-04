@@ -1,4 +1,4 @@
-import { entryQuality, entryRegimeRejection, entryExecutionQuality, PAPER_STRATEGY } from "./paper-strategy.js";
+import { entryQuality, entryRegimeRejection, entryExecutionQuality, roundTripLossPercent, getPaperStrategy, entryPolicyConfig, PAPER_STRATEGY } from "./paper-strategy.js";
 import { V4, v4PoolId, type V4Evidence, type V4Route } from "./uniswap-v4.js";
 import { sellObservation, failedSellObservation, appendLiquidityObservation, ExitLiquiditySafetyGate, type LiquidityObservation } from "./paper-liquidity.js";
 import { unknownLaunchEvidence, type LaunchEvidence } from "./launch-evidence.js";
@@ -8,6 +8,7 @@ import type { LiveLaunchDecision, LiveSnapshot } from "./live.js";
 import { accountCapacity, proposeTradePlan, evaluateExit, initialManagement, type PaperTradePlan, type Management, type ExitReason } from "./paper-policy.js";
 
 export const PAPER_CONFIG = Object.freeze({
+  PAPER_STRATEGY_VERSION: 3,
   MIN_REAL_EXIT_RESERVE_ETH: .01, MIN_EXIT_COVERAGE_RATIO: 100, MAX_EXIT_PARTICIPATION_BPS: 100,
   TRACTION_WINDOW_SECONDS: 300, TRACTION_OBSERVATION_COUNT: 3, TRACTION_OBSERVATION_MIN_MS: 10_000,
   LIQUIDITY_OBSERVATION_COUNT: 3, LIQUIDITY_OBSERVATION_MIN_MS: 30_000, LIQUIDITY_OBSERVATION_WINDOW_MS: 90_000, MAX_LIQUIDITY_DROP_PERCENT: 10,
@@ -22,8 +23,13 @@ export type PaperConfig = { -readonly [K in keyof typeof PAPER_CONFIG]: number }
 export interface Costs { feesUsd: number | null; slippageUsd: number | null; priceImpactPercent: number | null; gasUsd: number | null }
 /** Prices include known fees/impact/slippage; gas is separate. Quotes must be sized to the requested fill. */
 export interface PaperQuote {
-  /** Entry context only: total supply × pinned pre-trade spot price (FDV estimate). */
-  marketCapUsd?: number | null; totalSupplyTokens?: string;
+  gasEstimate?: { chainId: number; priceWei: string; gwei: number; timestamp: string; gasUnits: number; model: "ASSUMED_SWAP_UNITS" };
+  /** Derived curve FDV: total supply × pinned pre-buy reserve-ratio price, including virtual reserves. */
+  derivedFdvUsd?: number;
+  valuationBasis?: "TOTAL_SUPPLY_X_CURVE_SPOT";
+  totalSupplyRaw?: string; totalSupplyTokens?: string;
+  /** Legacy saved FDV field. New quotes use derivedFdvUsd; this is not verified Pons market cap. */
+  marketCapUsd?: number | null;
   v4?: V4Evidence;
   tokenAddress: string; side: "BUY" | "SELL"; timestamp: string; blockTimestamp: string;
   source: string; blockNumber: number; rawPriceUsd: number; fillPriceUsd: number;
@@ -103,6 +109,7 @@ const positive = (n: number): boolean => Number.isFinite(n) && n > 0;
 const iso = (now: number): string => new Date(now).toISOString();
 export function initialPaperState(now = Date.now(), config: PaperConfig = PAPER_CONFIG): PaperState {
   if (Object.keys(PAPER_CONFIG).some(key => !positive(config[key as keyof PaperConfig])) ||
+      ![3, 4].includes(config.PAPER_STRATEGY_VERSION) ||
       !Number.isInteger(config.TRACTION_OBSERVATION_COUNT) || config.TRACTION_OBSERVATION_COUNT < 2 ||
       config.TRACTION_WINDOW_SECONDS <= 0 || config.TRACTION_OBSERVATION_MIN_MS <= 0 ||
       !Number.isInteger(config.LIQUIDITY_OBSERVATION_COUNT) || config.LIQUIDITY_OBSERVATION_COUNT < 2 || config.LIQUIDITY_OBSERVATION_COUNT > 100 ||
@@ -169,6 +176,7 @@ export function paperLaunchRejection(c: Candidate, state: PaperState, now: numbe
   return null;
 }
 export function isPaperTradeEligible(candidate: Candidate, state: PaperState, sizeUsd: number, now = Date.now()): Eligibility {
+  const policy = getPaperStrategy(state.config), entryConfig = entryPolicyConfig(state.config);
   const reject = (reason: string, outcome: Eligibility["outcome"] = "PAPER_REJECT", details: string[] = []): Eligibility => ({ outcome, reason, details });
   if (candidate.decision === "VETO" || candidate.handoffs.some(h => h.outcome === "VETO")) return reject("GPTHEIST_VETO", "VETO");
   if (candidate.decision !== "WATCH" || !candidate.evidenceComplete || !completedWatch(candidate.handoffs)) return reject("INCOMPLETE_GPTHEIST_WATCH");
@@ -176,7 +184,7 @@ export function isPaperTradeEligible(candidate: Candidate, state: PaperState, si
   const freshness = paperLaunchRejection(candidate, state, now);
   if (freshness) return reject(freshness);
   if (candidate.quote.status !== "AVAILABLE") return reject(candidate.quote.reason,
-    candidate.quote.reason === "INSUFFICIENT_TRACTION" ? candidate.tractionDiagnostics && candidate.tractionDiagnostics.verifiedObservationCount < state.config.TRACTION_OBSERVATION_COUNT ? "OBSERVING" : candidate.recentTraction.status === "UNKNOWN" ? "OBSERVING" : "PAPER_REJECT" : "PAPER_REJECT", candidate.quote.details);
+    candidate.quote.reason === "INSUFFICIENT_TRACTION" ? candidate.tractionDiagnostics && candidate.tractionDiagnostics.verifiedObservationCount < entryConfig.TRACTION_OBSERVATION_COUNT ? "OBSERVING" : candidate.recentTraction.status === "UNKNOWN" ? "OBSERVING" : "PAPER_REJECT" : "PAPER_REJECT", candidate.quote.details);
   if (candidate.launch && candidate.launch.pairToken !== `0x${"0".repeat(40)}`) return reject("UNSUPPORTED_PAIR", "NOT_TRADABLE");
   const regime = entryRegimeRejection(state, now);
   if (regime) return reject(regime);
@@ -187,8 +195,9 @@ export function isPaperTradeEligible(candidate: Candidate, state: PaperState, si
   if (candidate.launch && (!q.evidence || q.evidence.curve.toLowerCase() !== candidate.launch.curve.toLowerCase())) return reject("MISSING_QUOTE_PROVENANCE", "NOT_TRADABLE");
   const capacity = accountCapacity(state, now);
   if (!positive(sizeUsd) || sizeUsd < state.config.MIN_POSITION_USD) return reject("SIZE_NOT_EXECUTABLE", "PAPER_REJECT", [`requested_position_usd=${sizeUsd}; minimum=${state.config.MIN_POSITION_USD}; condition=!(sizeUsd>0 && sizeUsd>=MIN_POSITION_USD)=true`]);
-  if (sizeUsd > capacity.equityUsd * state.config.MAX_POSITION_EQUITY_PERCENT / 100 + 1e-8) return reject("MAX_POSITION_EXPOSURE");
-  if (capacity.exposureUsd + sizeUsd > capacity.equityUsd * state.config.MAX_PORTFOLIO_EXPOSURE_PERCENT / 100 + 1e-8) return reject("MAX_PORTFOLIO_EXPOSURE");
+  const entryCostUsd = sizeUsd + (q.costs.gasUsd ?? 0);
+  if (entryCostUsd > capacity.equityUsd * capacity.maxPositionPercent / 100 + 1e-8) return reject("MAX_POSITION_EXPOSURE");
+  if (capacity.exposureUsd + entryCostUsd > capacity.equityUsd * state.config.MAX_PORTFOLIO_EXPOSURE_PERCENT / 100 + 1e-8) return reject("MAX_PORTFOLIO_EXPOSURE");
   if (Math.abs(q.notionalUsd - sizeUsd) > 1e-8) return reject("QUOTE_SIZE_MISMATCH", "NOT_TRADABLE");
   if (q.liquidityUsd < sizeUsd) return reject("INSUFFICIENT_LIQUIDITY", "PAPER_REJECT", [`realLiquidityUsd=${q.liquidityUsd}; proposedUsd=${sizeUsd}`]);
   if (sizeUsd > q.liquidityUsd * state.config.MAX_REAL_LIQUIDITY_PERCENT / 100 + 1e-8) return reject("REAL_LIQUIDITY_CAP", "PAPER_REJECT", [`realLiquidityUsd=${q.liquidityUsd}; proposedUsd=${sizeUsd}; maxParticipationPercent=${state.config.MAX_REAL_LIQUIDITY_PERCENT}`]);
@@ -208,19 +217,20 @@ export function isPaperTradeEligible(candidate: Candidate, state: PaperState, si
       sell.tokenUnits !== q.tokenUnits || sell.quantity !== q.quantity || sell.blockNumber < q.blockNumber ||
       (q.evidence && (!sell.evidence || sell.evidence.tokenDecimals !== q.evidence.tokenDecimals || sell.evidence.curve !== q.evidence.curve))) return reject("TOKEN_UNITS_UNVERIFIED");
   if (sell.notionalUsd > sell.liquidityUsd) return reject("INVALID_QUOTE_LIQUIDITY", "PAPER_REJECT", [`sellUsd=${sell.notionalUsd}; realLiquidityUsd=${sell.liquidityUsd}`]);
-  if ((1 - sell.notionalUsd / q.notionalUsd) * 100 >= state.config.MAX_DOWNSIDE_PERCENT) return reject("ROUND_TRIP_COST_TOO_HIGH");
+  const roundTripLoss = roundTripLossPercent(q);
+  if (roundTripLoss === null || roundTripLoss >= state.config.MAX_DOWNSIDE_PERCENT) return reject("ROUND_TRIP_COST_TOO_HIGH");
   const observation = sellObservation(sell, sizeUsd);
   if (!observation) return reject("CURVE_STATE_UNAVAILABLE", "PAPER_REJECT", ["Full SELL reserve evidence missing"]);
-  const safety = ExitLiquiditySafetyGate(observation, state.liquidityHistory?.[candidate.launchId] ?? [], state.config);
+  const safety = ExitLiquiditySafetyGate(observation, state.liquidityHistory?.[candidate.launchId] ?? [], entryConfig);
   if (safety.reason) return reject(safety.reason, "PAPER_REJECT", safety.details);
   const traction = candidate.recentTraction;
   if (traction.status !== "VERIFIED" || (traction.progressChangeBps ?? 0) <= 0 ||
       !/^[1-9][0-9]*$/.test(traction.reserveChangeWei ?? "") || traction.toTimestamp == null ||
       now / 1000 - traction.toTimestamp < 0 || now / 1000 - traction.toTimestamp > state.config.PAPER_MAX_LAUNCH_AGE_SECONDS) return reject("INSUFFICIENT_TRACTION");
   if (candidate.launch) {
-    const quality = entryQuality(candidate, q, now);
+    const quality = entryQuality(candidate, q, now, policy);
     if (!quality.passed) return reject(quality.reason!, "PAPER_REJECT", [JSON.stringify(quality)]);
-    const executable = entryExecutionQuality(q, state.liquidityHistory?.[candidate.launchId] ?? [], now);
+    const executable = entryExecutionQuality(q, state.liquidityHistory?.[candidate.launchId] ?? [], now, policy);
     if (!executable.passed) return reject(executable.reason!, "PAPER_REJECT", [JSON.stringify(executable)]);
   }
   return { outcome: "PAPER_ELIGIBLE", reason: "ALL_PAPER_GATES_CLEARED", details: ["SIMULATED_EXECUTION", "Social quality is unverified; gas and execution drift are excluded when unknown"] };
@@ -290,7 +300,8 @@ export function enterPaper(state: PaperState, candidate: Candidate, sizeUsd: num
       ...(result.reason === "BACKFILL_EVENT" ? { eventProvenance: Object.fromEntries(result.details.map(detail => {
         const separator = detail.indexOf("="); return [detail.slice(0, separator), detail.slice(separator + 1)];
       })) } : {}) });
-  if (plan && (plan.strategyVersion ?? 0) >= 2 && sizeUsd > plan.account.equityUsd * PAPER_STRATEGY.maxTokenExposurePercent / 100 + 1e-8) {
+  const planStrategy = plan?.strategyVersion === 4 ? getPaperStrategy({ PAPER_STRATEGY_VERSION: 4 }, plan.account.equityUsd) : PAPER_STRATEGY;
+  if (plan && (plan.strategyVersion ?? 0) >= 2 && sizeUsd > plan.account.equityUsd * planStrategy.maxTokenExposurePercent / 100 + 1e-8) {
     result = { outcome: "PAPER_REJECT", reason: "PLAN_GAP_RISK_CAP", details: [] };
   }
   if (plan && (Math.abs(plan.approvedSizeUsd - sizeUsd) > 1e-8 || sizeUsd * plan.exitPolicy.downsidePercent / 100 > plan.riskBudgetUsd + 1e-8)) {
@@ -311,7 +322,7 @@ export function enterPaper(state: PaperState, candidate: Candidate, sizeUsd: num
   const q = structuredClone(candidate.quote.quote), costBasisUsd = sizeUsd + (q.costs.gasUsd ?? 0);
   const savedPlan = structuredClone(plan ?? proposeTradePlan(state, candidate, q, now));
   savedPlan.approvedSizeUsd = sizeUsd; savedPlan.entryQuote = q;
-  savedPlan.exitLiquiditySafety = ExitLiquiditySafetyGate(sellObservation(q.roundTrip!.sell, sizeUsd)!, state.liquidityHistory?.[candidate.launchId] ?? [], state.config);
+  savedPlan.exitLiquiditySafety = ExitLiquiditySafetyGate(sellObservation(q.roundTrip!.sell, sizeUsd)!, state.liquidityHistory?.[candidate.launchId] ?? [], entryPolicyConfig(state.config));
   state.cash -= costBasisUsd;
   state.positions.push({ id: randomUUID(), mode: "PAPER", execution: "SIMULATED", candidate: structuredClone(candidate),
     tokenAddress: candidate.tokenAddress, name: candidate.name, symbol: candidate.symbol, launchId: candidate.launchId,
@@ -422,7 +433,36 @@ export function unavailablePonsQuote(launch?: LiveLaunchDecision): QuoteResult {
     details: [] };
 }
 export type EntryQuoteProvider = (launch: LiveLaunchDecision, sizeUsd: number) => Promise<QuoteResult>;
+/** Build independent exit evidence during inflow confirmation, before the entry signal matures. */
+async function observeEntryLiquidity(state: PaperState, candidate: Candidate, quotes: EntryQuoteProvider, clock: () => number): Promise<void> {
+  if (accountCapacity(state, clock()).equityUsd * getPaperStrategy(state.config, accountCapacity(state, clock()).equityUsd).maxTokenExposurePercent / 100 < state.config.MIN_POSITION_USD) return;
+  if (!candidate.launch || paperLaunchRejection(candidate, state, clock()) || entryRegimeRejection(state, clock()) ||
+      state.positions.length >= state.config.MAX_OPEN_POSITIONS || dailyRealizedLoss(state, clock()) >= state.config.MAX_DAILY_LOSS_USD ||
+      accountCapacity(state, clock()).availableCapacityUsd < state.config.MIN_POSITION_USD) return;
+  const history = state.liquidityHistory?.[candidate.launchId] ?? [];
+  if (history.at(-1)?.block === candidate.currentBlock) return;
+  const rows = candidate.tractionDiagnostics?.observations ?? [], last = rows.at(-1), previous = rows.at(-2);
+  if (!last || !previous || last.verificationStatus !== "VERIFIED" || previous.verificationStatus !== "VERIFIED" ||
+      !last.reserve || !previous.reserve || BigInt(last.reserve) <= BigInt(previous.reserve) ||
+      (last.curveProgressBps ?? 0) <= (previous.curveProgressBps ?? 0)) return;
+  let result: QuoteResult;
+  try { result = await quotes(candidate.launch, state.config.MIN_POSITION_USD); }
+  catch { return; }
+  if (result.status !== "AVAILABLE" || quoteProblem(result.quote, clock(), state.config.QUOTE_MAX_AGE_MS, state.config.ETH_USD_MAX_AGE_MS)) return;
+  const q = result.quote, sell = q.roundTrip?.sell;
+  if (!sell || q.side !== "BUY" || q.tokenAddress.toLowerCase() !== candidate.tokenAddress.toLowerCase() ||
+      !q.tokenUnits || !/^[1-9][0-9]*$/.test(q.tokenUnits) || q.evidence?.curve.toLowerCase() !== candidate.launch.curve.toLowerCase() ||
+      Math.abs(q.notionalUsd - state.config.MIN_POSITION_USD) > 1e-8 || sell.tokenAddress.toLowerCase() !== candidate.tokenAddress.toLowerCase() ||
+      sell.tokenUnits !== q.tokenUnits || sell.quantity !== q.quantity || sell.blockNumber < q.blockNumber ||
+      sell.evidence?.curve.toLowerCase() !== candidate.launch.curve.toLowerCase() ||
+      quoteProblem(sell, clock(), state.config.QUOTE_MAX_AGE_MS, state.config.ETH_USD_MAX_AGE_MS)) return;
+  const observation = sellObservation(sell, state.config.MIN_POSITION_USD);
+  if (!observation) return;
+  (state.liquidityHistory ??= {})[candidate.launchId] = appendLiquidityObservation(history, observation, state.config);
+  activity(state, "PRE_ENTRY_LIQUIDITY_OBSERVED", "Minimum-size round trip sampled during inflow confirmation; no entry authorized", clock(), candidate, { observation });
+}
 export function observeCandidateTraction(state: PaperState, candidate: Candidate, snapshot: LiveSnapshot, clock: () => number): TractionDiagnostics {
+  const config = entryPolicyConfig(state.config);
   const historyMap = state.tractionHistory ??= {};
   const key = candidate.launchId;
   const rows = historyMap[key] ??= [];
@@ -450,12 +490,12 @@ export function observeCandidateTraction(state: PaperState, candidate: Candidate
       curveProgressDeltaBps: previousProgress === null || progress === null ? null : progress - previousProgress,
       verificationStatus: verified ? "VERIFIED" : "UNAVAILABLE", quoteStatus: candidate.quote.status === "AVAILABLE" ? "AVAILABLE" : candidate.quote.reason });
   }
-  const cutoff = (candidate.currentTimestamp ?? Math.floor(clock()/1000)) - state.config.TRACTION_WINDOW_SECONDS;
+  const cutoff = (candidate.currentTimestamp ?? Math.floor(clock()/1000)) - config.TRACTION_WINDOW_SECONDS;
   const observations = rows.filter(row => Date.parse(row.timestamp) / 1000 >= cutoff);
   const recent = observations.filter(row => row.verificationStatus === "VERIFIED");
   const first = recent[0], last = recent.at(-1);
-  const enough = recent.length >= state.config.TRACTION_OBSERVATION_COUNT && !!first && !!last &&
-    Date.parse(last.timestamp) - Date.parse(first.timestamp) >= state.config.TRACTION_OBSERVATION_MIN_MS && last.block > first.block;
+  const enough = recent.length >= config.TRACTION_OBSERVATION_COUNT && !!first && !!last &&
+    Date.parse(last.timestamp) - Date.parse(first.timestamp) >= config.TRACTION_OBSERVATION_MIN_MS && last.block > first.block;
   const reserveDelta = enough ? BigInt(last!.reserve!) - BigInt(first!.reserve!) : null;
   const curveDelta = enough ? last!.curveProgressBps! - first!.curveProgressBps! : null;
   const positiveReserveChangeDetected = reserveDelta !== null && reserveDelta > 0n;
@@ -465,7 +505,7 @@ export function observeCandidateTraction(state: PaperState, candidate: Candidate
     !positiveReserveChangeDetected && !positiveCurveChangeDetected ? "NO_POSITIVE_RESERVE_OR_CURVE_CHANGE" :
     !positiveReserveChangeDetected ? "NO_POSITIVE_RESERVE_CHANGE" : "NO_POSITIVE_CURVE_PROGRESS_CHANGE";
   const diagnostics: TractionDiagnostics = { observationCount: observations.length, verifiedObservationCount: recent.length, observations,
-    tractionWindowSeconds: state.config.TRACTION_WINDOW_SECONDS, positiveReserveChangeDetected,
+    tractionWindowSeconds: config.TRACTION_WINDOW_SECONDS, positiveReserveChangeDetected,
     positiveCurveChangeDetected, tractionPass, exactFailureReason };
   candidate.tractionDiagnostics = diagnostics;
   candidate.recentTraction = { ...candidate.recentTraction,
@@ -489,7 +529,7 @@ export async function observeSnapshot(state: PaperState, snapshot: LiveSnapshot,
   const previousHead = state.lastObservedHeadBlock;
   const latest = snapshot.launches[0];
   if (latest) state.latestGate = { stage: "PROFESSOR", outcome: latest.verdict, message: latest.handoffs.at(-1)?.message ?? "" };
-  for (const sourceLaunch of [...snapshot.launches].sort((a,b)=>a.blockNumber-b.blockNumber||a.logIndex-b.logIndex)) {
+  for (const sourceLaunch of [...snapshot.launches].sort((a,b)=>b.blockNumber-a.blockNumber||b.logIndex-a.logIndex)) {
     const chronology = sourceLaunch.chronology ?? unknownLaunchEvidence(sourceLaunch.blockNumber);
     const sourceId = `${sourceLaunch.transactionHash}:${sourceLaunch.logIndex}`;
     const priorLedger = state.researchLedger?.[sourceId];
@@ -532,7 +572,10 @@ export async function observeSnapshot(state: PaperState, snapshot: LiveSnapshot,
         candidate.quote = { status:"NOT_PAPER_TRADABLE",reason:"STALE_RESEARCH",details:[] };
         enterPaper(state, candidate, state.config.MIN_POSITION_USD, clock());
       }
-      else await preparePaperTrade(state,candidate,quotes,clock);
+      else {
+        await observeEntryLiquidity(state, candidate, quotes, clock);
+        await preparePaperTrade(state,candidate,quotes,clock);
+      }
     } else if (candidate.decision === "WATCH" && !traction.tractionPass) {
       candidate.quote = { status:"NOT_PAPER_TRADABLE", reason:"INSUFFICIENT_TRACTION", details:[traction.exactFailureReason ?? "TRACTION_HISTORY_INSUFFICIENT"] };
       enterPaper(state,candidate,state.config.MIN_POSITION_USD,clock());
@@ -559,6 +602,7 @@ export async function observeSnapshot(state: PaperState, snapshot: LiveSnapshot,
 
 /** Separate experimental paper policy and sizing; never rewrites the GPTHEIST verdict. */
 export async function preparePaperTrade(state: PaperState, candidate: Candidate, quotes: EntryQuoteProvider, clock = Date.now): Promise<void> {
+  const policy = getPaperStrategy(state.config, accountCapacity(state, clock()).equityUsd);
   if (!candidate.launch) return;
   if (paperLaunchRejection(candidate, state, clock())) { enterPaper(state, candidate, state.config.MIN_POSITION_USD, clock()); return; }
   if ((candidate.tractionDiagnostics?.tractionPass !== true || candidate.recentTraction.status !== "VERIFIED" || (candidate.recentTraction.progressChangeBps ?? 0) <= 0 ||
@@ -568,10 +612,10 @@ export async function preparePaperTrade(state: PaperState, candidate: Candidate,
   }
   const regime = entryRegimeRejection(state, clock());
   if (regime) {
-    candidate.quote = { status: "NOT_PAPER_TRADABLE", reason: regime, details: ["New entries pause for 15 minutes after three consecutive v2 losses; open-position exits continue"] };
+    candidate.quote = { status: "NOT_PAPER_TRADABLE", reason: regime, details: [`New entries pause for ${policy.lossStreakPauseMs / 60_000} minutes after ${policy.lossStreakLimit} consecutive v${policy.version} losses; open-position exits continue`] };
     enterPaper(state, candidate, state.config.MIN_POSITION_USD, clock()); return;
   }
-  const quality = entryQuality(candidate, undefined, clock());
+  const quality = entryQuality(candidate, undefined, clock(), policy);
   if (!quality.passed) {
     candidate.quote = { status: "NOT_PAPER_TRADABLE", reason: quality.reason!, details: [JSON.stringify(quality)] };
     enterPaper(state, candidate, state.config.MIN_POSITION_USD, clock()); return;
@@ -600,8 +644,13 @@ export async function preparePaperTrade(state: PaperState, candidate: Candidate,
     enterPaper(state, candidate, size, clock());
   };
   const capacity = accountCapacity(state, clock());
+  // Quote the allocation we could actually use, rather than a larger account-capacity probe.
+  let probeSize = Math.min(capacity.availableCapacityUsd,
+    Math.floor(capacity.equityUsd * policy.maxTokenExposurePercent) / 100);
+  if (probeSize < state.config.MIN_POSITION_USD) {
+    reject("ACCOUNT_TOO_SMALL_FOR_STRATEGY", probeSize, [`strategy_cap_usd=${probeSize}; minimum_trade_usd=${state.config.MIN_POSITION_USD}; strategy_allocation_percent=${policy.maxTokenExposurePercent}; required_equity_before_gas_usd=${state.config.MIN_POSITION_USD * 100 / policy.maxTokenExposurePercent}`]); return;
+  }
   if (capacity.availableCapacityUsd < state.config.MIN_POSITION_USD) { reject("INSUFFICIENT_PAPER_CAPACITY", 0); return; }
-  let probeSize = capacity.availableCapacityUsd;
   candidate.quote = await get(probeSize);
   while (candidate.quote.status !== "AVAILABLE" && ["GRADUATION_FILL_UNSUPPORTED", "INVALID_SIZE", "INSUFFICIENT_LIQUIDITY"].includes(candidate.quote.reason) && probeSize / 2 >= state.config.MIN_POSITION_USD) {
     probeSize = Math.floor(probeSize * 50) / 100; candidate.quote = await get(probeSize);
@@ -637,7 +686,8 @@ export async function preparePaperTrade(state: PaperState, candidate: Candidate,
         plan = { ...finalPlan, proposedSizeUsd: plan.proposedSizeUsd, approvedSizeUsd: size, sizingAttempts: attempts };
         enterPaper(state, candidate, size, clock(), plan); return;
       }
-      if (!["PRICE_IMPACT_LIMIT", "INSUFFICIENT_LIQUIDITY", "ENTRY_FRICTION_TOO_HIGH"].includes(gate.reason)) { enterPaper(state, candidate, size, clock()); return; }
+      if (gate.reason === "ENTRY_FRICTION_TOO_HIGH" && policy.version === 4 && (candidate.quote.quote.costs.gasUsd ?? 0) > 0) { enterPaper(state, candidate, size, clock()); return; }
+      if (!["PRICE_IMPACT_LIMIT", "INSUFFICIENT_LIQUIDITY", "ENTRY_FRICTION_TOO_HIGH", "EXIT_COVERAGE_TOO_LOW", "REAL_LIQUIDITY_CAP"].includes(gate.reason)) { enterPaper(state, candidate, size, clock()); return; }
     } else {
       attempts.push({ sizeUsd: size, outcome: candidate.quote.reason, impactPercent: null });
       if (!["GRADUATION_FILL_UNSUPPORTED", "INVALID_SIZE", "INSUFFICIENT_LIQUIDITY"].includes(candidate.quote.reason)) { enterPaper(state, candidate, size, clock()); return; }

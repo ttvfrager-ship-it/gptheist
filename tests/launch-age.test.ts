@@ -93,3 +93,24 @@ test("launch timestamp after head and mismatched event hash are not verified", a
   f.launch.blockHash = `0x${"b".repeat(64)}`;
   assert.equal((await launchEvidence(async (_m,p) => ({number:p![0],timestamp:"0x100",hash:`0x${"a".repeat(64)}`}), 2, [f.launch], [f.launch.market]))[0]!.launchTimestamp, null);
 });
+
+test("launch headers are reused only while current logs attest the same block hash", async () => {
+  const f = fixture(), reads: number[] = [];
+  let launchHash = `0x${"a".repeat(64)}`;
+  f.launch.blockHash = launchHash;
+  const rpc: RpcCaller = async (_method, params) => {
+    const block = Number(params![0]); reads.push(block);
+    return { number: params![0], timestamp: `0x${(1000 + block).toString(16)}`, hash: block === 1 ? launchHash : `0x${"b".repeat(64)}` };
+  };
+  await launchEvidence(rpc, 2, [f.launch], [f.launch.market]);
+  await launchEvidence(rpc, 3, [f.launch], [f.launch.market]);
+  assert.equal(reads.filter(block => block === 1).length, 1);
+  assert.ok(reads.includes(2) && reads.includes(3), "Current heads are always freshly verified");
+  launchHash = `0x${"c".repeat(64)}`; f.launch.blockHash = launchHash;
+  const [changed] = await launchEvidence(rpc, 4, [f.launch], [f.launch.market]);
+  assert.equal(reads.filter(block => block === 1).length, 2);
+  assert.equal(changed!.launchBlockHash, launchHash);
+  delete f.launch.blockHash;
+  await launchEvidence(rpc, 5, [f.launch], [f.launch.market]);
+  assert.equal(reads.filter(block => block === 1).length, 3, "Missing source hashes cannot authorize reuse");
+});

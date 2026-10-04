@@ -58,6 +58,16 @@ test("paper entry debits cash, preserves raw/effective fills, and does not chang
   assert.equal(accountSummary(s).equity, 1000); assert.equal(s.positions[0]?.entry.rawPriceUsd, 1);
   c.name = "mutated"; assert.equal(s.positions[0]?.candidate.name, "TEST ONLY");
 });
+test("final eligibility checks include entry gas in exposure and both gas charges in downside", () => {
+  const s = initialPaperState(now), q = quote();
+  q.costs.gasUsd = 11;
+  assert.equal(enterPaper(s, candidate(q), 10, now).reason, "MAX_POSITION_EXPOSURE");
+  const c = candidate();
+  if (c.quote.status !== "AVAILABLE") throw Error("fixture");
+  c.quote.quote.roundTrip!.sell.costs.gasUsd = 5;
+  assert.equal(enterPaper(s, c, 10, now).reason, "ROUND_TRIP_COST_TOO_HIGH");
+  assert.equal(s.cash, 1000); assert.equal(s.positions.length, 0);
+});
 test("fresh price update calculates unrealized P&L and equity", () => {
   const s = initialPaperState(now); enterPaper(s, candidate(), 10, now);
   markPaperPosition(s, s.positions[0]!.id, available(quote(1.1, "SELL")), now);
@@ -96,7 +106,13 @@ test("duplicate addresses and maximum open positions are blocked", () => {
 });
 test("daily realized loss is gross losses in UTC, blocks entries but resets next day", async () => {
   const s = initialPaperState(now);
-  for (let i = 0; i < 6; i++) { const c = candidate(); c.launchId = `loss-${i}`; enterPaper(s, c, 10, now); await closeAt(s, .1); }
+  // Legacy trades isolate the daily account limit from the versioned strategy cooldown.
+  for (let i = 0; i < 6; i++) {
+    const c = candidate(); c.launchId = `loss-${i}`;
+    assert.equal(enterPaper(s, c, 10, now).outcome, "PAPER_BUY");
+    delete s.positions[0]!.plan.strategyVersion;
+    await closeAt(s, .1);
+  }
   assert.equal(enterPaper(s, candidate(), 10, now).reason, "DAILY_LOSS_LIMIT");
   const q = quote(); q.timestamp = q.blockTimestamp = new Date(now + 86_400_000).toISOString(); q.evidence!.usdTimestamp = q.timestamp;
   assert.equal(enterPaper(s, { ...candidate(q), ...chronology(now + 86_400_000) }, 10, now + 86_400_000).outcome, "PAPER_BUY");

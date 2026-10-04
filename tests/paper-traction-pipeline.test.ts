@@ -7,6 +7,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PaperStore } from "../src/paper-store.js";
+import { readPaperQuote } from "../src/paper-quotes.js";
 
 test("traction accumulates verified distinct-block observations for the same LIVE launch", () => {
   const f = fixture(), state = initialPaperState(f.time), candidate = liveCandidate(f.launch);
@@ -97,4 +98,52 @@ test("legacy persisted LIVE decision restores candidate identity without inventi
     assert.equal(restored.tractionWatchlist?.[id]?.token, candidate.tokenAddress);
     assert.deepEqual(restored.tractionHistory?.[id] ?? [], []);
   } finally { await store.close(); }
+});
+
+test("liquidity builds alongside inflow confirmation and admits a fresh fully checked trade", async () => {
+  const f = fixture(), state = initialPaperState(f.time);
+  const eth = 10n ** 18n, sizes: number[] = [];
+  for (let i = 0; i < 4; i++) {
+    const now = f.time + i * 15_000, block = 100 + i, real = eth * BigInt(4 + i * 2) / 10n;
+    f.state.real = real; f.state.reserve = eth + real;
+    f.state.headBlock = block; f.state.blockTime = Math.floor(now / 1000);
+    f.state.usd.timestamp = new Date(now).toISOString();
+    const launch = structuredClone(f.launch);
+    if (launch.market.status !== "VERIFIED") throw new Error("fixture");
+    launch.market.realQuoteReserve = real.toString(); launch.market.quoteReserve = f.state.reserve.toString();
+    launch.market.progressBps = 2000 + i * 1000;
+    launch.chronology = { ...launch.chronology!, currentBlock: block, currentTimestamp: Math.floor(now / 1000),
+      currentBlockHash: `0x${"b".repeat(64)}`, tokenAgeSeconds: Math.floor(now / 1000) - launch.chronology!.launchTimestamp! };
+    await observeSnapshot(state, { ...f.snapshot, headBlock: block, fetchedAt: new Date(now).toISOString(), launches: [launch] }, now,
+      async (l, size) => { sizes.push(size); return readPaperQuote(f.rpc, async () => f.state.usd, l, { side: "BUY", sizeUsd: size }, () => now); }, () => now);
+    if (i < 3) assert.equal(state.positions.length, 0, "Observation alone cannot authorize a trade");
+    if (i === 1) {
+      assert.equal(state.liquidityHistory?.[`${launch.transactionHash}:${launch.logIndex}`]?.length, 1);
+      assert.equal(state.decisions.at(-1)?.reason, "INSUFFICIENT_TRACTION");
+    }
+  }
+  assert.equal(state.positions.length, 1, JSON.stringify(state.decisions.at(-1)));
+  const p = state.positions[0]!;
+  assert.deepEqual(p.plan.exitLiquiditySafety!.observations.map(o => o.block), [101, 102, 103]);
+  assert.ok(p.plan.entryQuality?.passed); assert.ok(p.plan.entryExecutionQuality?.passed);
+  assert.ok(sizes.includes(state.config.MIN_POSITION_USD));
+  assert.ok(sizes.filter(size => size === p.sizeUsd).length >= 3, "Approved allocation still receives planning and final reads");
+  assert.ok(state.cash < state.config.STARTING_BALANCE_USD);
+});
+
+test("VETO, BACKFILL and unchanged launches cannot start quote sampling", async () => {
+  const f = fixture();
+  for (const mode of ["VETO", "BACKFILL", "FLAT"] as const) {
+    const state = initialPaperState(f.time); let calls = 0;
+    for (let i = 0; i < 3; i++) {
+      const now = f.time + i * 15_000, launch = structuredClone(f.launch), block = 100 + i;
+      if (mode === "VETO") launch.verdict = "VETO";
+      launch.chronology = { ...launch.chronology!, eventMode: mode === "BACKFILL" ? "BACKFILL" : "LIVE",
+        currentBlock: block, currentTimestamp: Math.floor(now / 1000), currentBlockHash: `0x${"b".repeat(64)}`,
+        tokenAgeSeconds: Math.floor(now / 1000) - launch.chronology!.launchTimestamp! };
+      await observeSnapshot(state, { ...f.snapshot, headBlock: block, fetchedAt: new Date(now).toISOString(), launches: [launch] }, now,
+        async () => { calls++; return { status: "NOT_PAPER_TRADABLE", reason: "TEST", details: [] }; }, () => now);
+    }
+    assert.equal(calls, 0, mode); assert.equal(state.positions.length, 0);
+  }
 });

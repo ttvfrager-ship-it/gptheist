@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fixture } from "./paper-fixtures.js";
-import { entryExecutionQuality, PAPER_STRATEGY } from "../src/paper-strategy.js";
+import { entryExecutionQuality, roundTripLossPercent, PAPER_STRATEGY } from "../src/paper-strategy.js";
 import { sellObservation } from "../src/paper-liquidity.js";
 import { initialPaperState, liveCandidate } from "../src/paper.js";
 import { seedLiquidityHistory, enterPaper } from "./liquidity-history-fixture.js";
@@ -11,6 +11,28 @@ async function setup(){const f=fixture(),r=await f.buy();if(r.status!=="AVAILABL
   const prior={...current,block:current.block-1,timestamp:new Date(Date.parse(current.timestamp)-15000).toISOString(),
     quoteReserveWei:String(BigInt(current.quoteReserveWei)*9n/10n),tokenReserveRaw:String(BigInt(current.tokenReserveRaw)*11n/10n)};
   return {f,quote:r.quote,current,prior};}
+test("round-trip friction includes both gas charges without counting embedded fees twice",async()=>{
+  const s=await setup(),q=s.quote;
+  q.notionalUsd=10;q.roundTrip!.sell.notionalUsd=9.8;
+  q.costs.gasUsd=.1;q.roundTrip!.sell.costs.gasUsd=.2;
+  assert.ok(Math.abs(roundTripLossPercent(q)!-(1-9.6/10.1)*100)<1e-10);
+  assert.equal(entryExecutionQuality(q,[s.prior],s.f.time).passed,true);
+  q.roundTrip!.sell.costs.gasUsd=.3;
+  assert.equal(entryExecutionQuality(q,[s.prior],s.f.time).reason,"ENTRY_FRICTION_TOO_HIGH");
+  q.costs.gasUsd=NaN;
+  assert.equal(roundTripLossPercent(q),null);
+  assert.equal(entryExecutionQuality(q,[s.prior],s.f.time).reason,"ENTRY_EXECUTION_EVIDENCE_INVALID");
+});
+test("momentum hurdle uses gas-adjusted friction",async()=>{
+  const s=await setup(),q=s.quote;
+  q.roundTrip!.sell.notionalUsd=q.notionalUsd*.98;
+  s.prior.quoteReserveWei=String(BigInt(s.current.quoteReserveWei)*96n/100n);
+  s.prior.tokenReserveRaw=s.current.tokenReserveRaw;
+  assert.equal(entryExecutionQuality(q,[s.prior],s.f.time).passed,true);
+  q.costs.gasUsd=q.notionalUsd*.01;
+  q.roundTrip!.sell.costs.gasUsd=q.notionalUsd*.01;
+  assert.equal(entryExecutionQuality(q,[s.prior],s.f.time).reason,"ENTRY_MOMENTUM_BELOW_COST");
+});
 test("v3 requires majority-real backing and momentum exceeding entry friction",async()=>{
   const s=await setup();let q=entryExecutionQuality(s.quote,[s.prior],s.f.time);
   assert.equal(q.passed,true);assert.equal(q.realReserveSharePercent,50);assert.ok(q.quoteMomentumPercent!>q.requiredMomentumPercent!);

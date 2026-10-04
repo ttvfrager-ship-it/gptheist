@@ -2,11 +2,30 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createDeskServer, createHttpRpcCaller } from "../src/server.js";
 import { TOKEN_LAUNCHED_TOPIC } from "../src/live.js";
 
 const word = (value: string): string => value.replace(/^0x/, "").padStart(64, "0");
 const topic = (value: string): `0x${string}` => `0x${word(value)}`;
+
+test("paper startup failures are printed and remain unavailable instead of silently trading", async () => {
+  const previous = process.env.PAPER_STRATEGY_MODE, messages: string[] = [];
+  const directory = await mkdtemp(join(tmpdir(), "paper-startup-log-"));
+  process.env.PAPER_STRATEGY_MODE = "INVALID";
+  const server = createDeskServer({ paperDirectory: directory, paperLog: message => { messages.push(message); }, rpc: fakeRpc });
+  try {
+    server.listen(0, "127.0.0.1"); await once(server, "listening");
+    const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/paper`);
+    assert.equal(response.status, 503);
+    assert.ok(messages.some(message => message.includes("PAPER startup error:") && message.includes("STRICT or SCALP")));
+  } finally {
+    server.close(); server.closeIdleConnections();
+    if (previous === undefined) delete process.env.PAPER_STRATEGY_MODE; else process.env.PAPER_STRATEGY_MODE = previous;
+  }
+});
 
 function fakeRpc(method: string): Promise<unknown> {
   if (method === "eth_chainId") return Promise.resolve("0x1237");
@@ -52,7 +71,7 @@ test("Desk caches upstream failures so clients cannot amplify RPC retries", asyn
   const second = await fetch(`http://127.0.0.1:${port}/api/snapshot`);
   assert.equal(first.status, 502);
   assert.equal(second.status, 502);
-  assert.equal(calls, 1);
+  assert.equal(calls, 2, "one concurrent chain/head pair; repeated client request uses cached failure");
 });
 
 test("Desk exposes bounded read-only X profile research without arbitrary outbound URLs", async (t) => {

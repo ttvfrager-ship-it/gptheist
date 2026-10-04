@@ -197,24 +197,65 @@ test("failed liquidity quotes retain exact inputs, raw responses, and validated 
 });
 
 
-test("entry stores market cap from the pinned spot price and total supply", async () => {
+test("entry stores explicitly derived curve FDV from pinned spot price and decimal-normalized supply", async () => {
   const f = fixture(), state = initialPaperState(f.time);
   await observeSnapshot(state, f.snapshot, f.time, (_launch, size) => f.buy(size));
   const position = state.positions[0]!;
   assert.equal(position.entry.totalSupplyTokens, "1000000000");
-  assert.equal(position.entry.marketCapUsd, position.entry.rawPriceUsd * 1_000_000_000);
-  const savedCap = position.entry.marketCapUsd;
+  assert.equal(position.entry.derivedFdvUsd, position.entry.rawPriceUsd * 1_000_000_000);
+  assert.equal(position.entry.totalSupplyRaw, "1000000000000000000000000000");
+  assert.equal(position.entry.valuationBasis, "TOTAL_SUPPLY_X_CURVE_SPOT");
+  assert.equal(position.entry.marketCapUsd, undefined);
+  const savedCap = position.entry.derivedFdvUsd;
   f.state.reserve *= 2n; f.state.supply = 2_000_000_000n * eth;
   const newQuote = await f.buy(); assert.equal(newQuote.status, "AVAILABLE");
-  if (newQuote.status === "AVAILABLE") assert.notEqual(newQuote.quote.marketCapUsd, savedCap);
-  assert.equal(position.entry.marketCapUsd, savedCap);
+  if (newQuote.status === "AVAILABLE") assert.notEqual(newQuote.quote.derivedFdvUsd, savedCap);
+  assert.equal(position.entry.derivedFdvUsd, savedCap);
 });
 
-test("missing total supply leaves market cap unknown without rejecting executable quotes", async () => {
+test("missing total supply leaves derived FDV unknown without rejecting executable quotes", async () => {
   const f = fixture(); f.state.supply = null;
   const result = await f.buy(); assert.equal(result.status, "AVAILABLE");
   if (result.status === "AVAILABLE") {
-    assert.equal(result.quote.marketCapUsd, undefined);
+    assert.equal(result.quote.derivedFdvUsd, undefined);
     assert.equal(result.quote.totalSupplyTokens, undefined);
   }
+});
+
+test("discovery starts while a position quote is stalled and committed activity is printed", async () => {
+  const f = fixture(), store = await PaperStore.open(await mkdtemp(join(tmpdir(), "paper-fast-discovery-")));
+  await store.update(state => observeSnapshot(state, f.snapshot, f.time, (_launch, size) => f.buy(size)));
+  let release!: (result: import("../src/paper.js").QuoteResult) => void;
+  const stalled = new Promise<import("../src/paper.js").QuoteResult>(resolve => { release = resolve; });
+  let discovered = false;
+  const messages: string[] = [];
+  const service = new PaperService(store, async () => { discovered = true; return { ...f.snapshot, fetchedAt: new Date(f.time + 1).toISOString() }; }, () => stalled,
+    undefined, undefined, Date.now, undefined, { log: message => messages.push(message) });
+  const tick = service.tick();
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(discovered, true, "A stalled sell quote must not delay launch discovery");
+    release({ status: "NOT_PAPER_TRADABLE", reason: "QUOTE_UNAVAILABLE", details: [] });
+    await tick;
+    assert.ok(messages.some(message => message.includes("PAPER scan:")));
+    assert.ok(messages.some(message => message.includes("QUOTE_UNAVAILABLE")));
+  } finally {
+    release({ status: "NOT_PAPER_TRADABLE", reason: "QUOTE_UNAVAILABLE", details: [] });
+    await tick;
+    await service.close();
+  }
+});
+
+test("cached snapshots do not repeat entry work or whole-account discovery writes", async () => {
+  const f = fixture(), store = await PaperStore.open(await mkdtemp(join(tmpdir(), "paper-cached-scan-")));
+  const service = new PaperService(store, async () => f.snapshot,
+    async () => ({ status: "NOT_PAPER_TRADABLE", reason: "TEST", details: [] }));
+  try {
+    await service.tick();
+    const before = store.read();
+    await service.tick();
+    assert.deepEqual(store.read(), before);
+    assert.equal(before.events.filter(e => e.eventType === "PAPER_LAB_FRAME").length, 1);
+    assert.equal(service.view().connection, "LIVE");
+  } finally { await service.close(); }
 });

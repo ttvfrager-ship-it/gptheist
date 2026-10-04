@@ -15,7 +15,7 @@ export interface LaunchEvidence {
     explanation: string };
 }
 interface Observation { eventMode: "LIVE" | "BACKFILL"; first: number; firstObservedAtMs: number; classificationReason: string; market: PonsMarketState; block: number; timestamp: number | null }
-interface Session { head: number; observations: Map<string, Observation> }
+interface Session { head: number; observations: Map<string, Observation>; headers: Map<number, NonNullable<Awaited<ReturnType<typeof readHeader>>>> }
 const sessions = new WeakMap<RpcCaller, Session>();
 export const RECENT_TRACTION_WINDOW_SECONDS = 300;
 export function normalizeTimestampMs(value: unknown): number | null {
@@ -42,10 +42,19 @@ export async function readHeader(rpc: RpcCaller, block: number): Promise<{ times
 /** Startup is a chronology boundary, never a synthetic launch time. Replays fail closed. */
   export async function launchEvidence(rpc: RpcCaller, head: number, launches: LiveLaunch[], markets: PonsMarketState[], discoveredAtMs = Date.now(), normalizedAtMs = discoveredAtMs, ingestedAtMs = normalizedAtMs): Promise<LaunchEvidence[]> {
   const previous = sessions.get(rpc);
-  const session = previous ?? { head, observations: new Map<string, Observation>() };
+  const session = previous ?? { head, observations: new Map<string, Observation>(), headers: new Map() };
   const current = await readHeader(rpc, head);
   const headers = new Map<number, Awaited<ReturnType<typeof readHeader>>>();
-  for (const block of new Set(launches.map(l => l.blockNumber))) headers.set(block, block === head ? current : await readHeader(rpc, block));
+  await Promise.all([...new Set(launches.map(l => l.blockNumber))].map(async block => {
+    const cached = session.headers.get(block);
+    // Reuse only when every current source log attests the same immutable block hash.
+    const matches = cached && launches.filter(l => l.blockNumber === block)
+      .every(l => l.blockHash?.toLowerCase() === cached.hash.toLowerCase());
+    const header = block === head ? current : matches ? cached : await readHeader(rpc, block);
+    headers.set(block, header);
+    if (header) session.headers.set(block, header);
+    else session.headers.delete(block);
+  }));
   const evidence = launches.map((launch, i): LaunchEvidence => {
     const header = headers.get(launch.blockNumber), old = session.observations.get(launch.token), market = markets[i]!;
     const valid = header && current && launch.blockNumber <= head && header.timestamp <= current.timestamp &&
@@ -79,6 +88,7 @@ export async function readHeader(rpc: RpcCaller, block: number): Promise<{ times
   });
   session.head = Math.max(session.head, head);
   for (const [token, observation] of session.observations) if (observation.block < head - 25_000) session.observations.delete(token);
+  for (const block of session.headers.keys()) if (block < head - 25_000) session.headers.delete(block);
   sessions.set(rpc, session);
   return evidence;
 }

@@ -1,23 +1,30 @@
 // Matched-size counterfactual: observed full-position SELL reads only, never inferred prices or rewritten fills.
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
-import { initialPaperState, markPaperPosition, monitorPaper, quoteProblem } from '../dist/src/paper.js';
+import { PAPER_CONFIG, initialPaperState, markPaperPosition, monitorPaper, quoteProblem } from '../dist/src/paper.js';
 import { initialManagement, proposeTradePlan } from '../dist/src/paper-policy.js';
-import { entryQuality, entryExecutionQuality, PAPER_STRATEGY, PAPER_STRATEGY_V2 } from '../dist/src/paper-strategy.js';
+import { entryQuality, entryExecutionQuality, entryPolicyConfig, PAPER_SCALP_STRATEGY, PAPER_STRATEGY, PAPER_STRATEGY_V2 } from '../dist/src/paper-strategy.js';
 const [input='runs/strategy-v2/tape.json',output='runs/strategy-v3/replay.json',version='3']=process.argv.slice(2);
-if(!['2','3'].includes(version))throw Error('Version must be 2 or 3');
-const policy=version==='2'?PAPER_STRATEGY_V2:PAPER_STRATEGY;
+if(!['2','3','4'].includes(version))throw Error('Version must be 2, 3 or 4');
+const policy=version==='4'?PAPER_SCALP_STRATEGY:version==='2'?{...PAPER_STRATEGY,...PAPER_STRATEGY_V2}:PAPER_STRATEGY;
 if(resolve(output)===resolve('runs/paper/state.json')||resolve(output)===resolve(input))throw Error('Replay output must be separate from evidence and account');
 const tape=JSON.parse(await readFile(input,'utf8'));
 const ordered=[...tape.trades].sort((a,b)=>Date.parse(a.enteredAt)-Date.parse(b.enteredAt));
 const outcomes=[];
 for(const original of ordered){
-  const now=Date.parse(original.enteredAt), quality=entryQuality(original.candidate,original.entry,now);
-  const executionQuality = version==='3' ? entryExecutionQuality(original.entry,original.plan.exitLiquiditySafety?.observations??[],now) : null;
+  const now=Date.parse(original.enteredAt), config={...PAPER_CONFIG,PAPER_STRATEGY_VERSION:version==='4'?4:3};
+  const candidate=structuredClone(original.candidate), entryConfig=entryPolicyConfig(config);
+  if(version==='4' && candidate.tractionDiagnostics){
+    candidate.tractionDiagnostics.tractionWindowSeconds=entryConfig.TRACTION_WINDOW_SECONDS;
+    candidate.tractionDiagnostics.observations=candidate.tractionDiagnostics.observations.filter(r=>now-Date.parse(r.timestamp)<=entryConfig.TRACTION_WINDOW_SECONDS*1000);
+  }
+  const quality=entryQuality(candidate,original.entry,now,policy);
+  const executionQuality = version!=='2' ? entryExecutionQuality(original.entry,original.plan.exitLiquiditySafety?.observations??[],now,policy) : null;
   const row={executionQuality,symbol:original.symbol,id:original.id,enteredAt:original.enteredAt,originalPnlUsd:original.pnlUsd,quality};
   if(!quality.passed || (executionQuality && !executionQuality.passed)){outcomes.push({...row,status:'ENTRY_REJECTED'});continue;}
-  const state=initialPaperState(now);
+  const state=initialPaperState(now,config);
   const p=structuredClone(original);delete p.exit;delete p.exitedAt;delete p.pnlUsd;delete p.returnPercent;delete p.exitReason;delete p.exitReasoning;
+  p.candidate=candidate;
   p.plan={...proposeTradePlan(state,p.candidate,p.entry,now),approvedSizeUsd:p.sizeUsd,strategyVersion:policy.version};
   p.management=initialManagement();p.current=structuredClone(p.entry);p.markStatus='UNAVAILABLE';p.markReason='REPLAY_AWAITING_QUOTE';
   state.positions=[p];state.cash-=p.costBasisUsd;

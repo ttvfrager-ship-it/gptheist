@@ -24,6 +24,19 @@ test("entry needs consistent recent inflows; an old pump, flat tail and single s
   }
   const s=signal([80,85,90,95,100]);assert.equal(entryQuality(s.candidate,undefined,s.f.time).passed,true);
 });
+
+test("fast samples use a time-spaced momentum window without hiding a fresh reversal", () => {
+  const s = signal([100,102,104,106,108,110,112,114,116,118,120,122,124]);
+  const rows = s.candidate.tractionDiagnostics!.observations;
+  rows.forEach((r, i) => { r.timestamp = new Date(s.f.time - (rows.length - i - 1) * 4000).toISOString(); });
+  const quality = entryQuality(s.candidate, undefined, s.f.time);
+  assert.equal(quality.passed, true); assert.equal(quality.samples, 5);
+  assert.equal(quality.confirmationSpanMs, 48_000);
+  rows.at(-2)!.reserve = String(130n * 10n ** 16n);
+  assert.equal(entryQuality(s.candidate, undefined, s.f.time).reason, "ENTRY_MOMENTUM_WEAK");
+  rows.at(-2)!.verificationStatus = "UNAVAILABLE";
+  assert.equal(entryQuality(s.candidate, undefined, s.f.time).reason, "ENTRY_CONFIRMATION_INVALID");
+});
 test("entry rejects future, duplicate-block and unverified confirmation evidence", () => {
   for(const change of [
     (c:Candidate,time:number)=>{c.tractionDiagnostics!.observations.at(-1)!.timestamp=new Date(time+1).toISOString();},
@@ -67,6 +80,19 @@ test("plans account for round-trip loss inside the stop distance and preserve ca
   assert.ok(p.proposedSizeUsd*p.exitPolicy.downsidePercent/100<=p.riskBudgetUsd+.01);
   assert.ok(p.proposedSizeUsd<=state.config.STARTING_BALANCE_USD*.005);
   assert.ok(p.exitPolicy.profitArmPercent<=6);assert.ok(p.exitPolicy.maxHoldMs<=600000);
+});
+
+test("entry filter and allocation include gas in the actual account cost", async () => {
+  const s=signal([80,85,90,95,100]),state=initialPaperState(s.f.time),r=await s.f.buy();
+  if(r.status!=="AVAILABLE")throw Error("fixture");
+  r.quote.roundTrip!.sell.notionalUsd=r.quote.notionalUsd*.98;
+  r.quote.costs.gasUsd=.2;r.quote.roundTrip!.sell.costs.gasUsd=.2;
+  assert.equal(entryQuality(s.candidate,r.quote,s.f.time).reason,"ENTRY_FRICTION_TOO_HIGH");
+  const plan=proposeTradePlan(state,s.candidate,r.quote,s.f.time);
+  assert.ok((plan.proposedSizeUsd+.2)*plan.exitPolicy.downsidePercent/100<=plan.riskBudgetUsd+1e-8);
+  assert.ok(plan.proposedSizeUsd+.2<=plan.account.equityUsd*PAPER_STRATEGY.maxTokenExposurePercent/100+1e-8);
+  r.quote.costs.gasUsd=state.cash;
+  assert.equal(proposeTradePlan(state,s.candidate,r.quote,s.f.time).proposedSizeUsd,0);
 });
 
 

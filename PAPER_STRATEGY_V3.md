@@ -12,6 +12,14 @@ V3 adds stricter entry selection to the [v2 policy](PAPER_STRATEGY_V2.md). It re
 
 Existing positions retain their saved exit plans. New entries receive strategy version 3 after the desk loads this build.
 
+## Gas accounting correction (2026-10-01)
+
+Entry confirmation, execution momentum and stop-distance planning now share the same round-trip loss calculation: `1 - (sell notional - sell gas) / (buy notional + buy gas)`. Fees and price impact are already embedded in quote notionals and are not deducted again. Unknown gas remains excluded and is not claimed to be estimated. Position sizing reserves known entry gas inside cash capacity, stop-risk budget and the token allocation cap; final eligibility includes it in account exposure limits.
+
+Regression tests cover gas turning an apparent viable trade into a rejection, the higher momentum hurdle, allocation limits, invalid gas and final eligibility. Removed the unused `codex` npm package to restore the existing runtime dependency allowlist; the bot only imports `viem`. Daily-loss accounting fixtures use legacy plans to isolate that limit from the separately tested strategy cooldown.
+
+The gas-aware replay is written separately to `runs/strategy-v3/gas-aware-replay.json`. Its result remains one accepted closed trade at +$1.49, 26 rejections and zero unresolved accepted trades. This correction does not establish a new profitable edge.
+
 ## Evidence and limits
 
 The frozen archive contains 27 original closed trades: 4 wins and −$59.83. V2's exploratory matched-size replay accepted six, with three wins and −$2.89. V3 rejects 26 and accepts one recorded trade, which closes at +$1.49 using separate observed final SELL evidence. There are no unresolved accepted trades in this replay.
@@ -28,4 +36,4 @@ The replay writes separate research artifacts and never rewrites the main paper 
 
 ## Activation
 
-The existing desk process is outside this sandbox's process namespace and cannot be restarted here. Restart that desk from its controlling terminal after building; use its existing configuration and paper data directory. `npm run desk` builds before starting. Do not start a second writer against the existing account. The current saved account still contains unversioned plans, so the new policy must not be reported as active until the restarted process creates v3 plans.
+On 2026-10-01 the existing desk was restarted after all 189 tests passed, preserving its environment and account directory. The restart retained an account backup at `runs/paper/monitor-fix-backup-1790888483443.json`. The restarted process loads the gas correction for future entries; historical plans and fills remain preserved. New-trade performance still requires prospective validation. `npm run desk` builds before starting; do not start a second writer against the existing account.

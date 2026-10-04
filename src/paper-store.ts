@@ -27,6 +27,7 @@ export function validatePaperState(value: unknown): asserts value is PaperState 
             p.plan.exitPolicy.trailingDrawdownPercent, p.plan.exitPolicy.maxHoldMs, p.plan.exitPolicy.reserveDropPercent,
             p.plan.exitPolicy.taxIncreaseBps, p.plan.exitPolicy.maxExitImpactPercent, p.plan.exitPolicy.graduationProgressBps].every(v => Number.isFinite(v) && v > 0) ||
           p.plan.exitPolicy.downsidePercent >= 100 || Math.abs(p.plan.approvedSizeUsd - p.sizeUsd) > 1e-8 ||
+          (p.plan.exitPolicy.takeProfitPercent !== undefined && (!Number.isFinite(p.plan.exitPolicy.takeProfitPercent) || p.plan.exitPolicy.takeProfitPercent <= 0)) ||
           !p.management || !Number.isSafeInteger(p.management.quoteFailureCount) || p.management.quoteFailureCount < 0 ||
           (p.management.peakLiquidationValueUsd !== null && (!Number.isFinite(p.management.peakLiquidationValueUsd) || p.management.peakLiquidationValueUsd <= 0)) ||
           !Number.isFinite(Date.parse(p.enteredAt)) || p.entry.side !== "BUY" ||
@@ -120,6 +121,11 @@ export class PaperStore {
         const interval = Number(process.env.PAPER_QUOTE_REFRESH_MS);
         if (!Number.isFinite(interval) || interval < 1000) throw new Error("PAPER_QUOTE_REFRESH_MS must be at least 1000");
         state.config.PAPER_QUOTE_REFRESH_MS = interval;
+      }
+      if (process.env.PAPER_STRATEGY_MODE !== undefined) {
+        const mode = process.env.PAPER_STRATEGY_MODE;
+        if (!["STRICT", "SCALP"].includes(mode)) throw new Error("PAPER_STRATEGY_MODE must be STRICT or SCALP");
+        state.config.PAPER_STRATEGY_VERSION = mode === "SCALP" ? 4 : 3;
       }
       for (const key of ["MIN_REAL_EXIT_RESERVE_ETH", "MIN_EXIT_COVERAGE_RATIO", "MAX_EXIT_PARTICIPATION_BPS", "LIQUIDITY_OBSERVATION_COUNT", "LIQUIDITY_OBSERVATION_MIN_MS", "LIQUIDITY_OBSERVATION_WINDOW_MS", "MAX_LIQUIDITY_DROP_PERCENT"] as const) {
         if (process.env[key] !== undefined) state.config[key] = Number(process.env[key]);

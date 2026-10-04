@@ -2,7 +2,7 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_RPC_URL, ROBINHOOD_CHAIN_ID, fetchLiveSnapshot, type LiveSnapshot, type RpcCaller } from "./live.js";
+import { DEFAULT_RPC_URL, ROBINHOOD_CHAIN_ID, fetchLiveSnapshot, createLiveDiscoveryCache, type LiveSnapshot, type RpcCaller } from "./live.js";
 
 import { PaperQuoteService } from "./paper-quotes.js";
 import { PaperStore } from "./paper-store.js";
@@ -36,6 +36,8 @@ const SECURITY_HEADERS = {
 
 export interface DeskServerOptions {
   paperDirectory?: string;
+  paperDiscoveryIntervalMs?: number;
+  paperLog?: (message: string) => void;
   rpc?: RpcCaller;
   rpcUrl?: string;
   assetsRoot?: string;
@@ -62,7 +64,7 @@ export function createHttpRpcCaller(url?: string, options: RpcCallerOptions = {}
   ]).map((value) => ({ url: value.replace(/#nologs$/, ""), logs: !value.endsWith("#nologs") }));
   const sleep = (milliseconds: number): Promise<void> => new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
   return async (method, params = []) => {
-    if (!["eth_chainId", "eth_blockNumber", "eth_getLogs", "eth_call", "eth_getBlockByNumber"].includes(method)) throw new Error("RPC method is outside the read-only allowlist");
+    if (!["eth_chainId", "eth_gasPrice", "eth_blockNumber", "eth_getLogs", "eth_call", "eth_getBlockByNumber"].includes(method)) throw new Error("RPC method is outside the read-only allowlist");
     const candidates = endpoints.filter((endpoint) => method !== "eth_getLogs" || endpoint.logs);
     if (candidates.length === 0) throw new Error("No configured RPC endpoint supports eth_getLogs");
     let lastError = "RPC request failed";
@@ -118,18 +120,19 @@ function send(response: ServerResponse, status: number, type: string, body: stri
 export function createDeskServer(options: DeskServerOptions = {}): Server {
   const rpc = options.rpc ?? createHttpRpcCaller(options.rpcUrl);
   const root = resolve(options.assetsRoot ?? DEFAULT_ASSETS);
-  const cacheMs = options.cacheMs ?? 4_000;
+  const cacheMs = options.cacheMs ?? Math.min(4000, (options.paperDiscoveryIntervalMs ?? 4000) / 2);
   const failureCacheMs = options.failureCacheMs ?? 15_000;
   const socialFetch = options.socialFetch ?? fetch;
   const socialCache = new Map<string, { at: number; value: string }>();
   let cached: { at: number; value: LiveSnapshot } | null = null;
   let cachedFailure: { at: number; message: string } | null = null;
   let pending: Promise<LiveSnapshot> | null = null;
+  const discoveryCache = createLiveDiscoveryCache();
   const snapshot = async (): Promise<LiveSnapshot> => {
     if (cached && Date.now() - cached.at < cacheMs) return cached.value;
     if (cachedFailure && Date.now() - cachedFailure.at < failureCacheMs) throw new Error(cachedFailure.message);
     if (!pending) {
-      pending = fetchLiveSnapshot(rpc).then((value) => {
+      pending = fetchLiveSnapshot(rpc, { discoveryCache }).then((value) => {
         cached = { at: Date.now(), value };
         cachedFailure = null;
         return value;
@@ -146,12 +149,16 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
   const paperReady = options.paperDirectory ? PaperStore.open(options.paperDirectory).then(store => {
     const quotes = new PaperQuoteService(rpc, store.read().config, options.paperUsdFetch);
     paper = new PaperService(store, snapshot, position => quotes.sell(position),
-      (launch, sizeUsd) => quotes.buy(launch, sizeUsd), quotes, Date.now, rpc); paper.start();
-  }).catch((error: unknown) => { paperError = error instanceof Error ? error.message : "Paper storage unavailable"; }) : Promise.resolve();
+      (launch, sizeUsd) => quotes.buy(launch, sizeUsd), quotes, Date.now, rpc, { discoveryIntervalMs: options.paperDiscoveryIntervalMs, log: options.paperLog }); paper.start();
+  }).catch((error: unknown) => {
+    paperError = error instanceof Error ? error.message : "Paper storage unavailable";
+    try { options.paperLog?.(`PAPER startup error: ${paperError}`); } catch { /* Logging must not change startup failure handling. */ }
+  }) : Promise.resolve();
   const assets: Record<string, [string, string]> = {
     "/paper": ["paper.html", "text/html; charset=utf-8"],
     "/paper.js": ["paper.js", "text/javascript; charset=utf-8"],
     "/paper.css": ["paper.css", "text/css; charset=utf-8"],
+    "/terminal.css": ["terminal.css", "text/css; charset=utf-8"],
     "/": ["index.html", "text/html; charset=utf-8"],
     "/index.html": ["index.html", "text/html; charset=utf-8"],
     "/trace": ["room.html", "text/html; charset=utf-8"],

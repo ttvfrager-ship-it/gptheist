@@ -1,3 +1,4 @@
+import { PaperGasCounter } from "./paper-gas.js";
 import { readV4SellQuote } from "./uniswap-v4.js";
 import { curveAmountOut, uint256 } from "./paper-math.js";
 import { decodeFunctionResult, encodeFunctionData, formatUnits, parseAbi, type Hex } from "viem";
@@ -96,24 +97,26 @@ async function calculatePaperQuote(
   clock = Date.now, config: PaperConfig = PAPER_CONFIG, diagnostics?: QuoteDiagnostics
 ): Promise<QuoteResult> {
   try {
-    if (await rpc("eth_chainId") !== `0x${ROBINHOOD_CHAIN_ID.toString(16)}`) return unavailable("WRONG_CHAIN");
     if (launch.pairToken !== `0x${"0".repeat(40)}`) return unavailable("UNSUPPORTED_PAIR");
-    const block = await rpc("eth_blockNumber");
+    const [chain, block] = await Promise.all([rpc("eth_chainId"), rpc("eth_blockNumber")]);
+    if (chain !== `0x${ROBINHOOD_CHAIN_ID.toString(16)}`) return unavailable("WRONG_CHAIN");
     if (typeof block !== "string" || !/^0x[0-9a-f]+$/i.test(block) || !Number.isSafeInteger(Number(BigInt(block)))) return unavailable("INVALID_BLOCK");
     if (diagnostics) diagnostics.currentBlock = Number(BigInt(block));
-    const h = header(await rpc("eth_getBlockByNumber", [block, false]), block);
-    const blockTimestamp = new Date(Number(BigInt(h.timestamp)) * 1000).toISOString();
-    if (diagnostics) diagnostics.blockTimestamp = blockTimestamp;
-    if (!fresh(blockTimestamp, clock(), config.QUOTE_MAX_AGE_MS)) return unavailable("QUOTE_STALE");
     const requiredNames = ["feeBps", "sellableTokens", "graduated", "readyToGraduate", "token", "factory", "pairToken", "decimals"] as const;
     const names = order.side === "BUY" ? [...requiredNames, "totalSupply" as const] : requiredNames;
     const calls = names.map(functionName => ({ target: (functionName === "decimals" || functionName === "totalSupply" ? launch.token : launch.curve) as Hex,
       allowFailure: true, callData: encodeFunctionData({ abi: ABI, functionName }) }));
-    const [research, raw, rate] = await Promise.all([
+    const [research, raw, rate, rawHeader] = await Promise.all([
       readPonsLaunchResearch(rpc, [launch], block),
       rpc("eth_call", [{ to: MULTICALL3, data: encodeFunctionData({ abi: MULTICALL_ABI, functionName: "aggregate3", args: [calls] }) }, block]),
-      usd()
+      usd(),
+      rpc("eth_getBlockByNumber", [block, false])
     ]);
+    const h = header(rawHeader, block);
+    const blockTimestamp = new Date(Number(BigInt(h.timestamp)) * 1000).toISOString();
+    if (diagnostics) diagnostics.blockTimestamp = blockTimestamp;
+    if (!fresh(blockTimestamp, clock(), config.QUOTE_MAX_AGE_MS)) return unavailable("QUOTE_STALE");
+
     const market = research[0]?.market;
     if (diagnostics) diagnostics.market = market;
     if (!market || market.status !== "VERIFIED") {
@@ -189,14 +192,14 @@ async function calculatePaperQuote(
     const quantity = Number(formatUnits(units, decimals));
     if (order.side === "SELL" && Math.abs(quantity - order.quantity) > order.quantity * 1e-10) return unavailable("TOKEN_QUANTITY_MISMATCH");
     // Optional entry context must never decide whether a sell is executable.
-    let entryContext: Pick<PaperQuote, "marketCapUsd" | "totalSupplyTokens"> = {};
+    let entryContext: Pick<PaperQuote, "derivedFdvUsd" | "valuationBasis" | "totalSupplyRaw" | "totalSupplyTokens"> = {};
     if (order.side === "BUY" && results[8]?.success) {
       try {
         const supply = decodeFunctionResult({ abi: ABI, functionName: "totalSupply", data: results[8].returnData });
         const totalSupplyTokens = formatUnits(supply, decimals);
-        const marketCapUsd = Number(totalSupplyTokens) * (toUsd(qr) / Number(formatUnits(tr, decimals)));
-        if (supply > 0n && Number.isFinite(marketCapUsd) && marketCapUsd > 0) entryContext = { totalSupplyTokens, marketCapUsd };
-      } catch { /* Supply unavailable: leave entry market cap unknown. */ }
+        const derivedFdvUsd = Number(totalSupplyTokens) * (toUsd(qr) / Number(formatUnits(tr, decimals)));
+        if (supply > 0n && Number.isFinite(derivedFdvUsd) && derivedFdvUsd > 0) entryContext = { totalSupplyTokens, totalSupplyRaw: supply.toString(), derivedFdvUsd, valuationBasis: "TOTAL_SUPPLY_X_CURVE_SPOT" };
+      } catch { /* Supply unavailable: leave derived FDV unknown. */ }
     }
     const quote: PaperQuote = {
       ...entryContext,
@@ -339,17 +342,19 @@ export class PaperQuoteService {
   private lastQuote: PaperQuote | null = null;
   private lastAttempt: { timestamp: string; reason: string | null } | null = null;
   private readonly usd: UsdRateProvider;
+  private readonly gas: PaperGasCounter;
   constructor(private readonly rpc: RpcCaller, private readonly config: PaperConfig, fetcher: typeof fetch = fetch, private readonly clock = Date.now) {
+    this.gas = new PaperGasCounter(rpc, fetcher, clock);
     const source = createEthUsdProvider(fetcher, clock, config.ETH_USD_MAX_AGE_MS);
     this.usd = async () => {
       try { const rate = await source(); this.lastUsd = rate; this.usdError = null; return rate; }
       catch (error) { this.usdError = error instanceof QuoteDataError ? error.reason : "ETH_USD_UNAVAILABLE"; throw error; }
     };
   }
-  async refreshUsd(): Promise<void> { try { await this.usd(); } catch { /* Status captures failure; positions retain their marks. */ } }
+  async refreshUsd(): Promise<void> { try { await Promise.all([this.usd(), this.gas.refresh()]); } catch { /* Status captures failure; positions retain their marks. */ } }
   private record(result: QuoteResult): QuoteResult {
     this.lastAttempt = { timestamp: new Date(this.clock()).toISOString(), reason: result.status === "AVAILABLE" ? null : result.reason };
-    if (result.status === "AVAILABLE") this.lastQuote = result.quote;
+    if (result.status === "AVAILABLE") { this.gas.apply(result.quote); this.lastQuote = result.quote; }
     return result;
   }
   async buy(launch: LiveLaunchDecision, sizeUsd: number): Promise<QuoteResult> {
@@ -364,6 +369,7 @@ export class PaperQuoteService {
     const usdStatus = this.usdError ?? (!this.lastUsd ? "ETH_USD_UNAVAILABLE" : fresh(this.lastUsd.timestamp, this.clock(), this.config.ETH_USD_MAX_AGE_MS) ? "LIVE" : "ETH_USD_STALE");
     const quoteFresh = this.lastQuote && !quoteProblem(this.lastQuote, this.clock(), this.config.QUOTE_MAX_AGE_MS, this.config.ETH_USD_MAX_AGE_MS);
     return { status: quoteFresh && usdStatus === "LIVE" && this.lastAttempt?.reason === null ? "LIVE" : "DEGRADED",
+      gas: this.gas.status(usdStatus === "LIVE" ? this.lastUsd?.ask ?? null : null),
       quoteSource: this.lastQuote?.source ?? "Pons curve / awaiting verified quote", lastAttempt: this.lastAttempt,
       lastQuoteTimestamp: this.lastQuote?.timestamp ?? null,
       ethUsd: { status: usdStatus, bid: this.lastUsd?.bid ?? null, ask: this.lastUsd?.ask ?? null,

@@ -84,7 +84,10 @@ async function main(args: string[]): Promise<void> {
     const port = Number(portText);
     if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) throw new Error("--port must be an integer from 0 to 65535");
     const rpcUrl = process.env.RPC_URL;
-    const server = await startDeskServer(rpcUrl ? { host, port, rpcUrl } : { host, port });
+    const discoveryIntervalMs = Number(process.env.PAPER_DISCOVERY_INTERVAL_MS ?? 4000);
+    if (!Number.isFinite(discoveryIntervalMs) || discoveryIntervalMs < 1000) throw new Error("PAPER_DISCOVERY_INTERVAL_MS must be at least 1000");
+    const server = await startDeskServer({ host, port, ...(rpcUrl ? { rpcUrl } : {}), paperDiscoveryIntervalMs: discoveryIntervalMs,
+      paperLog: message => process.stdout.write(sanitizeTerminal(message) + "\n") });
     for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => { server.close(); server.closeIdleConnections(); });
     const address = server.address();
     const boundPort = typeof address === "object" && address !== null ? address.port : port;

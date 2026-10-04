@@ -47,6 +47,18 @@ test("C: executable full SELL below configured coverage rejects with numbers", a
   assert.ok(r.details.some(d => d.includes(`positionExitWei=${o.positionExitWei}`) && d.includes("configuredMinimum=1000")));
   assert.equal(state.positions.length, 0);
 });
+test("planning finds a smaller executable allocation within the unchanged exit-coverage limit", async () => {
+  const { f, state, c } = await setup();
+  state.config.MIN_EXIT_COVERAGE_RATIO = 1000;
+  const sizes: number[] = [];
+  await preparePaperTrade(state, c, async (_launch, size) => { sizes.push(size); return f.buy(size); }, () => f.time);
+  assert.equal(state.positions.length, 1);
+  const p = state.positions[0]!;
+  assert.ok(p.sizeUsd <= 2); assert.ok(p.sizeUsd >= state.config.MIN_POSITION_USD);
+  assert.ok(p.plan.exitLiquiditySafety!.current.exitCoverageRatio >= 1000);
+  assert.equal(state.config.MIN_EXIT_COVERAGE_RATIO, 1000);
+  assert.ok(sizes.filter(size => size === p.sizeUsd).length >= 2);
+});
 test("D: measured peak-to-current decline rejects even if current coverage is strong", async () => {
   const { f, state, c, history } = await setup(); history[0]!.realQuoteReserveWei = "2000000000000000000";
   const r = enterPaper(state, c, 10, f.time);

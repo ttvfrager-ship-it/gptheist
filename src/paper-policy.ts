@@ -1,8 +1,9 @@
-import { PAPER_STRATEGY, entryQuality, entryExecutionQuality, type EntryQuality, type EntryExecutionQuality } from "./paper-strategy.js";
+import { getPaperStrategy, entryPolicyConfig, PAPER_SCALP_STRATEGY, entryQuality, entryExecutionQuality, roundTripLossPercent, type EntryQuality, type EntryExecutionQuality } from "./paper-strategy.js";
 import { sellObservation, ExitLiquiditySafetyGate, type LiquiditySafety } from "./paper-liquidity.js";
 import { quoteProblem, type Candidate, type PaperQuote, type PaperState, type Position } from "./paper.js";
 
 export interface ExitPolicy {
+  takeProfitPercent?: number;
   profitFloorPercent?: number; stagnationMs?: number;
   downsidePercent: number;
   profitArmPercent: number;
@@ -29,7 +30,7 @@ export interface PaperTradePlan {
   entryQuote: PaperQuote; sources: string[]; reasoning: string[];
 }
 export const EXIT_REASONS = ["DYNAMIC_RISK_EXIT", "PROFIT_PROTECTION", "TRAILING_EXIT", "MAX_HOLD_EXIT",
-  "SIGNAL_DETERIORATION", "TAX_CHANGE", "LIQUIDITY_OR_QUOTE_DETERIORATION", "GRADUATION_TRANSITION", "STAGNATION_EXIT"] as const;
+  "SIGNAL_DETERIORATION", "TAX_CHANGE", "LIQUIDITY_OR_QUOTE_DETERIORATION", "GRADUATION_TRANSITION", "STAGNATION_EXIT", "SCALP_TAKE_PROFIT"] as const;
 export type ExitReason = typeof EXIT_REASONS[number];
 export interface ExitDecision { reason: ExitReason; reasoning: string[]; triggeredAt: string }
 export interface Management {
@@ -54,15 +55,18 @@ export function accountCapacity(state: PaperState, now = Date.now()) {
   const exposureUsd = values.reduce((sum,p)=>sum+Math.max(p.position.costBasisUsd,p.value),0);
   const unavailablePositions = values.filter(p=>!p.fresh).length;
   const unavailableCostBasisUsd = values.filter(p=>!p.fresh).reduce((sum,p)=>sum+p.position.costBasisUsd,0);
-  const availableCapacityUsd = cents(Math.min(equityUsd * c.MAX_POSITION_EQUITY_PERCENT / 100,
+  const allocationPercent = getPaperStrategy(c, equityUsd).maxTokenExposurePercent;
+  const maxPositionPercent = c.PAPER_STRATEGY_VERSION === 4 ? Math.max(c.MAX_POSITION_EQUITY_PERCENT, allocationPercent) : c.MAX_POSITION_EQUITY_PERCENT;
+  const availableCapacityUsd = cents(Math.min(equityUsd * maxPositionPercent / 100,
     equityUsd * c.MAX_PORTFOLIO_EXPOSURE_PERCENT / 100 - exposureUsd,
     state.cash - equityUsd * c.MIN_CASH_RESERVE_PERCENT / 100));
-  return { equityUsd, cashUsd: state.cash, exposureUsd, availableCapacityUsd, unavailablePositions, unavailableCostBasisUsd };
+  return { equityUsd, maxPositionPercent, allocationPercent, cashUsd: state.cash, exposureUsd, availableCapacityUsd, unavailablePositions, unavailableCostBasisUsd };
 }
 
 /** Experimental deterministic policy weights, not forecasts or claimed market signals. */
 export function proposeTradePlan(state: PaperState, candidate: Candidate, quote: PaperQuote, now: number): PaperTradePlan {
   const account = accountCapacity(state, now), e = quote.evidence;
+  const policy = getPaperStrategy(state.config, account.equityUsd), scalp = policy.version === PAPER_SCALP_STRATEGY.version;
   const palermoScore = candidate.launch?.assessment.score ?? null;
   const progress = e?.progressBps ?? null;
   const feePct = e ? (e.feeBps + e.creatorTaxBps + e.snipeTaxBps) / 100 : null;
@@ -80,34 +84,41 @@ export function proposeTradePlan(state: PaperState, candidate: Candidate, quote:
     `Known buy fees/taxes: ${feePct ?? "unknown"}%; quote impact: ${impact ?? "unknown"}%`,
     `Verified real quote liquidity: $${quote.liquidityUsd.toFixed(2)}; no volume, volatility or social inputs`
   ];
-  const roundTripLoss = Math.max(0, quote.roundTrip ? (1 - quote.roundTrip.sell.notionalUsd / quote.notionalUsd) * 100 : 0);
-  const downsidePercent = Math.min(state.config.MAX_DOWNSIDE_PERCENT, Math.max(6 + 10 * (1 - riskScore), roundTripLoss + 2));
+  const roundTripLoss = Math.max(0, roundTripLossPercent(quote) ?? 0);
+  const downsidePercent = Math.min(state.config.MAX_DOWNSIDE_PERCENT, scalp ? PAPER_SCALP_STRATEGY.maxDownsidePercent : state.config.MAX_DOWNSIDE_PERCENT,
+    Math.max(scalp ? 4 : 6 + 10 * (1 - riskScore), roundTripLoss + 2));
   // Returns already include buy/sell friction. Protect NET profits rather than charging fees twice.
-  const profitArmPercent = 3 + 3 * (1 - riskScore);
+  const profitArmPercent = scalp ? PAPER_SCALP_STRATEGY.profitArmPercent : 3 + 3 * (1 - riskScore);
   const exitPolicy: ExitPolicy = {
     downsidePercent, profitArmPercent,
-    trailingDrawdownPercent: 2 + 2 * (1 - riskScore),
-    profitFloorPercent: PAPER_STRATEGY.profitFloorPercent, stagnationMs: PAPER_STRATEGY.stagnationMs,
-    maxHoldMs: Math.floor(Math.min(state.config.MAX_HOLD_MS, PAPER_STRATEGY.maxHoldMs) * (.5 + .5 * (1 - riskScore))),
-    reserveDropPercent: 10 + 25 * (1 - riskScore), taxIncreaseBps: Math.round(50 + 150 * (1 - riskScore)),
+    trailingDrawdownPercent: scalp ? PAPER_SCALP_STRATEGY.trailingDrawdownPercent : 2 + 2 * (1 - riskScore),
+    profitFloorPercent: policy.profitFloorPercent, stagnationMs: policy.stagnationMs,
+    maxHoldMs: Math.floor(Math.min(state.config.MAX_HOLD_MS, policy.maxHoldMs) * (scalp ? 1 : .5 + .5 * (1 - riskScore))),
+    ...(scalp ? { takeProfitPercent: PAPER_SCALP_STRATEGY.takeProfitPercent } : {}),
+    reserveDropPercent: scalp ? 6 : 10 + 25 * (1 - riskScore), taxIncreaseBps: Math.round(50 + 150 * (1 - riskScore)),
     maxExitImpactPercent: state.config.MAX_ENTRY_IMPACT_PERCENT * (1.5 + (1 - riskScore)),
     graduationProgressBps: Math.round(9000 + 800 * (1 - riskScore)),
-    reasons: ["Higher assessed risk receives tighter downside, shorter holding time and earlier profit protection",
+    reasons: [scalp ? "SCALP v4 uses a short fixed holding limit, net profit protection and fee-aware downside" : "Higher assessed risk receives tighter downside, shorter holding time and earlier profit protection",
       "Thresholds are experimental policy choices derived from verified inputs, not estimated volatility",
       "Any exit requires a fresh final full-size sell quote; unavailable liquidity can delay a loss exit"]
   };
-  const riskBudgetUsd = account.equityUsd * state.config.MAX_RISK_EQUITY_PERCENT / 100 * (1 - .75 * riskScore);
-  const proposedSizeUsd = cents(Math.min(account.availableCapacityUsd, riskBudgetUsd / (downsidePercent / 100),
-    account.equityUsd * PAPER_STRATEGY.maxTokenExposurePercent / 100,
-    quote.liquidityUsd * state.config.MAX_REAL_LIQUIDITY_PERCENT / 100));
+  const riskPercent = scalp ? Math.max(state.config.MAX_RISK_EQUITY_PERCENT, Math.min(.5, policy.maxTokenExposurePercent * .1)) : state.config.MAX_RISK_EQUITY_PERCENT;
+  const riskBudgetUsd = account.equityUsd * riskPercent / 100 * (1 - .75 * riskScore);
+  const entryGasUsd = quote.costs.gasUsd ?? 0;
+  const proposedSizeUsd = cents(Math.min(account.availableCapacityUsd - entryGasUsd, riskBudgetUsd / (downsidePercent / 100) - entryGasUsd,
+    account.equityUsd * policy.maxTokenExposurePercent / 100 - entryGasUsd,
+    quote.liquidityUsd * state.config.MAX_REAL_LIQUIDITY_PERCENT / 100,
+    quote.liquidityUsd / state.config.MIN_EXIT_COVERAGE_RATIO,
+    quote.liquidityUsd * state.config.MAX_EXIT_PARTICIPATION_BPS / 10_000));
   const exitObservation = quote.roundTrip ? sellObservation(quote.roundTrip.sell, quote.notionalUsd) : null;
-  return { strategyVersion: PAPER_STRATEGY.version, entryExecutionQuality: entryExecutionQuality(quote, state.liquidityHistory?.[candidate.launchId] ?? [], now), entryQuality: entryQuality(candidate, quote, now), ...(exitObservation ? { exitLiquiditySafety: ExitLiquiditySafetyGate(exitObservation, state.liquidityHistory?.[candidate.launchId] ?? [], state.config) } : {}), version: 1, createdAt: new Date(now).toISOString(), experimental: true, gptheistVerdict: "WATCH", paperVerdict: "PAPER_ELIGIBLE",
+  return { strategyVersion: policy.version, entryExecutionQuality: entryExecutionQuality(quote, state.liquidityHistory?.[candidate.launchId] ?? [], now, policy), entryQuality: entryQuality(candidate, quote, now, policy), ...(exitObservation ? { exitLiquiditySafety: ExitLiquiditySafetyGate(exitObservation, state.liquidityHistory?.[candidate.launchId] ?? [], entryPolicyConfig(state.config)) } : {}), version: 1, createdAt: new Date(now).toISOString(), experimental: true, gptheistVerdict: "WATCH", paperVerdict: "PAPER_ELIGIBLE",
     riskClass, riskScore, riskReasons, riskBudgetUsd, proposedSizeUsd, approvedSizeUsd: 0, account,
     inputs: { palermoScore, curveProgressBps: progress, creatorTaxBps: e?.creatorTaxBps ?? null,
       snipeTaxBps: e?.snipeTaxBps ?? null, protocolFeeBps: e?.feeBps ?? null, impactPercent: impact,
       realLiquidityUsd: quote.liquidityUsd, quoteReserve: e?.quoteReserve ?? null, realQuoteReserve: e?.realQuoteReserve ?? null },
     exitPolicy, sizingAttempts: [], entryQuote: structuredClone(quote), sources: [...new Set([quote.source, ...(e ? [e.usdSource] : [])])],
-    reasoning: ["Size = minimum of account capacity, stop-distance risk budget, 0.5% equity token gap-risk cap, and real-liquidity participation cap",
+    reasoning: [`Size = minimum of account capacity, stop-distance risk budget, ${policy.maxTokenExposurePercent}% equity token gap-risk cap, real-liquidity participation and full-exit coverage caps`,
+      ...(scalp ? [`SCALP v4 dynamic sizing: allocation cap ${policy.maxTokenExposurePercent.toFixed(3)}% ($${(account.equityUsd * policy.maxTokenExposurePercent / 100).toFixed(2)}); risk budget cap ${riskPercent.toFixed(3)}% before quality adjustment. Small accounts can allocate up to 5% equity; target ticket $2.50, gas deducted. Experimental.`] : []),
       "Each proposed size must pass a sized quote; excess impact reduces size and triggers another quote",
       "Final entry is separately re-quoted and all account limits are checked again"] };
 }
@@ -126,6 +137,8 @@ export function evaluateExit(position: Position, now: number): ExitDecision | nu
   const dd = peak > 0 ? (peak - value) / peak * 100 : 0;
   const exit = (reason: ExitReason, message: string): ExitDecision => ({ reason, reasoning: [message], triggeredAt: new Date(now).toISOString() });
   if (ret <= -policy.downsidePercent) return exit("DYNAMIC_RISK_EXIT", `Return ${ret.toFixed(3)}% crossed plan downside -${policy.downsidePercent.toFixed(3)}%`);
+  if (policy.takeProfitPercent !== undefined && ret >= policy.takeProfitPercent)
+    return exit("SCALP_TAKE_PROFIT", `Net executable return ${ret.toFixed(3)}% reached the saved ${policy.takeProfitPercent}% scalp target`);
   if (now - Date.parse(p.enteredAt) >= policy.maxHoldMs) return exit("MAX_HOLD_EXIT", `Position age reached plan limit ${policy.maxHoldMs} ms`);
   if (peakReturn >= policy.profitArmPercent) {
     if (ret <= Math.max(policy.profitFloorPercent ?? 0, peakReturn * (policy.profitFloorPercent === undefined ? .25 : .5))) return exit("PROFIT_PROTECTION", "Armed profit protection: executable return crossed the plan profit floor");

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { encodeFunctionResult, parseAbi } from "viem";
-import { decodeTokenLaunchedLog, fetchLiveSnapshot, TOKEN_LAUNCHED_TOPIC } from "../src/live.js";
+import { decodeTokenLaunchedLog, fetchLiveSnapshot, createLiveDiscoveryCache, refreshLiveLaunchesAtHead, TOKEN_LAUNCHED_TOPIC, type RpcCaller, type RpcLog } from "../src/live.js";
 import { MULTICALL3, assessPonsLaunch, decodePonsMarketState, decodePonsTokenMetadata } from "../src/market.js";
+import { fixture } from "./paper-fixtures.js";
 
 const word = (value: string): string => value.replace(/^0x/, "").padStart(64, "0");
 const addressTopic = (address: string): `0x${string}` => `0x${word(address)}`;
@@ -18,6 +19,64 @@ const tokenMetadataAbi = parseAbi([
   "function symbol() view returns (string)",
   "function getTokenInfo() view returns (address tokenDeployer, string tokenLogo, string tokenDescription, Socials tokenSocials)"
 ]);
+
+test("incremental discovery preserves context, drops reorg logs and never advances through failures", async () => {
+  let head = 120, changed = false, fail = false;
+  const ranges: number[] = [];
+  const makeLog = (block: number, id: number): RpcLog => ({
+    address: "0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e", blockNumber: `0x${block.toString(16)}`,
+    blockHash: `0x${"a".repeat(64)}`, transactionHash: `0x${id.toString(16).padStart(64, "0")}`, logIndex: "0x0",
+    topics: [TOKEN_LAUNCHED_TOPIC, addressTopic(`0x${id.toString(16).padStart(40, "0")}`),
+      addressTopic(`0x${"2".repeat(40)}`), addressTopic(`0x${"3".repeat(40)}`)],
+    data: `0x${word("0x0")}${word("0x0")}${word("0x3a4")}`
+  });
+  let logs = [makeLog(40, 1), makeLog(110, 2)];
+  const rpc: RpcCaller = async (method, params) => {
+    if (method === "eth_chainId") return "0x1237";
+    if (method === "eth_blockNumber") return `0x${head.toString(16)}`;
+    if (method === "eth_getBlockByNumber") return { number: params![0], timestamp: `0x${(1000 + Number(params![0])).toString(16)}`,
+      hash: `0x${(changed ? "b" : "a").repeat(64)}` };
+    if (method === "eth_getLogs") {
+      const request = params![0] as { fromBlock: string; topics: string[] };
+      if (fail) throw new Error("TEST log outage");
+      if (request.topics[0] !== TOKEN_LAUNCHED_TOPIC) return [];
+      const from = Number(request.fromBlock); ranges.push(from);
+      return logs.filter(log => Number(log.blockNumber) >= from && Number(log.blockNumber) <= head);
+    }
+    throw new Error("TEST market evidence unavailable");
+  };
+  const cache = createLiveDiscoveryCache();
+  await fetchLiveSnapshot(rpc, { blockWindow: 100, discoveryCache: cache });
+  assert.equal(ranges.at(-1), 21);
+  head = 130; logs.push(makeLog(125, 3));
+  const fresh = await fetchLiveSnapshot(rpc, { blockWindow: 100, discoveryCache: cache });
+  assert.equal(ranges.at(-1), 89);
+  assert.equal(fresh.launches[0]!.deployerResearch.priorLaunches, 2);
+  assert.equal(fresh.historyWindowBlocks, 100);
+  assert.equal(fresh.launches.length, 3);
+  const before = structuredClone(cache);
+  head = 140; fail = true;
+  await assert.rejects(fetchLiveSnapshot(rpc, { blockWindow: 100, discoveryCache: cache }), /outage/);
+  assert.deepEqual(cache, before);
+  fail = false; changed = true; logs = logs.filter(log => Number(log.blockNumber) !== 125);
+  const reorg = await fetchLiveSnapshot(rpc, { blockWindow: 100, discoveryCache: cache });
+  assert.equal(ranges.at(-1), 41, "Changed canonical head forces a full-window rebuild");
+  assert.equal(reorg.launches.length, 1); assert.equal(reorg.launches[0]!.blockNumber, 110);
+  head = 100;
+  const rewind = await fetchLiveSnapshot(rpc, { blockWindow: 100, discoveryCache: cache });
+  assert.equal(ranges.at(-1), 1); assert.equal(rewind.launches.length, 1); assert.equal(rewind.launches[0]!.blockNumber, 40);
+});
+
+test("retained watchlist refresh shares the header and bounds each pinned market batch", async () => {
+  const f = fixture();
+  const launches = Array.from({ length: 25 }, (_, i) => ({ ...structuredClone(f.launch), logIndex: i }));
+  const refreshed = await refreshLiveLaunchesAtHead(f.rpc, launches, 2);
+  assert.equal(refreshed.length, 25);
+  assert.equal(f.methods.filter(method => method === "eth_getBlockByNumber").length, 1);
+  assert.equal(f.methods.filter(method => method === "eth_call").length, 2);
+  assert.ok(refreshed.every((launch, i) => launch.market.status === "VERIFIED" && launch.logIndex === i &&
+    launch.chronology?.currentBlock === 2 && launch.chronology.currentBlockHash === `0x${"b".repeat(64)}`));
+});
 
 test("decodes declared token identity and socials without claiming external reputation", () => {
   const name = encodeFunctionResult({ abi: tokenMetadataAbi, functionName: "name", result: "Research Cat" });

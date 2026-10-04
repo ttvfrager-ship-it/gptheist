@@ -1,7 +1,8 @@
-import { PAPER_STRATEGY } from "./paper-strategy.js";
+import { getPaperStrategy } from "./paper-strategy.js";
 import { quoteProblem, type ClosedTrade, type PaperState } from "./paper.js";
 /** Descriptive statistics only. Unknown excursion history is never synthesized. */
 export function researchMetrics(state: PaperState, now = Date.now()) {
+  const strategy = getPaperStrategy(state.config);
   const trades = state.trades;
   const fills = [...state.positions.map(p => p.entry), ...trades.flatMap(t => [t.entry, t.exit])];
   const mean = (values: number[]) => values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
@@ -14,8 +15,8 @@ export function researchMetrics(state: PaperState, now = Date.now()) {
     }
     return buckets;
   };
-  const cohort = trades.filter(t => t.plan.strategyVersion === PAPER_STRATEGY.version);
-  const open = state.positions.filter(p=>p.plan.strategyVersion===PAPER_STRATEGY.version);
+  const cohort = trades.filter(t => t.plan.strategyVersion === strategy.version);
+  const open = state.positions.filter(p=>p.plan.strategyVersion===strategy.version);
   const unavailableOpen = open.filter(p=>p.markStatus!=="FRESH" || p.current.side!=="SELL" ||
     quoteProblem(p.current,now,state.config.QUOTE_MAX_AGE_MS,state.config.ETH_USD_MAX_AGE_MS));
   const openUnrealizedPnlUsd = unavailableOpen.length ? null : open.reduce((sum,p)=>sum+p.current.notionalUsd-(p.current.costs.gasUsd??0)-p.costBasisUsd,0);
@@ -25,14 +26,14 @@ export function researchMetrics(state: PaperState, now = Date.now()) {
   const grossProfit = cohort.filter(t=>t.pnlUsd>0).reduce((sum,t)=>sum+t.pnlUsd,0);
   const winRatePercent = cohort.length ? wins/cohort.length*100 : null;
   return {
-    strategyValidation: { version: PAPER_STRATEGY.version, targetWinRatePercent: PAPER_STRATEGY.targetWinRatePercent,
-      minimumTrades: PAPER_STRATEGY.minimumValidationTrades, closedTrades: cohort.length, wins, winRatePercent, netPnlUsd,
+    strategyValidation: { version: strategy.version, targetWinRatePercent: strategy.targetWinRatePercent,
+      minimumTrades: strategy.minimumValidationTrades, closedTrades: cohort.length, wins, winRatePercent, netPnlUsd,
       profitFactor: grossLoss > 0 ? grossProfit/grossLoss : null,
       openPositions: open.length, unavailableOpenPositions: unavailableOpen.length, openUnrealizedPnlUsd,
       netLiquidationPnlUsd: openUnrealizedPnlUsd === null ? null : netPnlUsd+openUnrealizedPnlUsd,
-      status: cohort.length < PAPER_STRATEGY.minimumValidationTrades ? "COLLECTING_EVIDENCE" :
+      status: cohort.length < strategy.minimumValidationTrades ? "COLLECTING_EVIDENCE" :
         unavailableOpen.length ? "UNVERIFIED_OPEN_EXPOSURE" :
-        winRatePercent! >= PAPER_STRATEGY.targetWinRatePercent && netPnlUsd > 0 && netPnlUsd+openUnrealizedPnlUsd! > 0 ? "TARGET_MET" : "BELOW_TARGET" },
+        winRatePercent! >= strategy.targetWinRatePercent && netPnlUsd > 0 && netPnlUsd+openUnrealizedPnlUsd! > 0 ? "TARGET_MET" : "BELOW_TARGET" },
     knownTaxesUsd: fills.reduce((sum, q) => sum + (q.evidence ? (Number(q.evidence.creatorTaxWei) + Number(q.evidence.snipeTaxWei)) / 1e18 * q.evidence.ethUsd : 0), 0),
     unknownTaxFills: fills.filter(q => !q.evidence).length,
     totalOpportunities: state.researchLedger ? Object.keys(state.researchLedger).length : null,

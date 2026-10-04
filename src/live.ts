@@ -1,4 +1,4 @@
-import { launchEvidence, type LaunchEvidence } from "./launch-evidence.js";
+import { launchEvidence, readHeader, type LaunchEvidence } from "./launch-evidence.js";
 import { AGENTS, type AgentHandoff, type AgentOutcome } from "./simulation.js";
 import { assessPonsLaunch, readPonsLaunchResearch, type PonsAssessment, type PonsMarketState, type PonsTokenMetadata } from "./market.js";
 import { toEventSelector } from "viem";
@@ -116,24 +116,36 @@ export interface LiveSnapshot {
 
 /** Refresh a retained, verified LIVE launch outside the rolling latest-launch list. Read-only. */
 export async function refreshLiveLaunchAtHead(rpc: RpcCaller, launch: LiveLaunchDecision, headBlock: number): Promise<LiveLaunchDecision> {
+  return (await refreshLiveLaunchesAtHead(rpc, [launch], headBlock))[0]!;
+}
+
+/** Share one head header and batched market reads across the retained watchlist. */
+export async function refreshLiveLaunchesAtHead(rpc: RpcCaller, launches: LiveLaunchDecision[], headBlock: number): Promise<LiveLaunchDecision[]> {
+  if (!launches.length) return [];
   const blockTag = `0x${headBlock.toString(16)}`;
+  const batches: LiveLaunchDecision[][] = [];
+  for (let i = 0; i < launches.length; i += 24) batches.push(launches.slice(i, i + 24));
   const [header, research] = await Promise.all([
-    rpc("eth_getBlockByNumber", [blockTag, false]), readPonsLaunchResearch(rpc, [launch], blockTag)
+    rpc("eth_getBlockByNumber", [blockTag, false]),
+    Promise.all(batches.map(batch => readPonsLaunchResearch(rpc, batch, blockTag))).then(rows => rows.flat())
   ]);
-  const h = header as Record<string, unknown> | null, row = research[0];
-  if (!h || h.number !== blockTag || typeof h.hash !== "string" || !/^0x[0-9a-f]{64}$/i.test(h.hash) ||
-      typeof h.timestamp !== "string" || !/^0x[0-9a-f]+$/i.test(h.timestamp))
-    return { ...launch, market: row?.market ?? { status: "UNAVAILABLE", reason: "retained launch refresh unavailable" } };
-  const currentTimestamp = Number(BigInt(h.timestamp));
-  const chronology = launch.chronology;
-  const refreshedChronology = chronology ? { ...chronology, currentBlock: headBlock, currentTimestamp,
-    currentBlockHash: h.hash, tokenAgeSeconds: chronology.launchTimestamp === null ? null : currentTimestamp - chronology.launchTimestamp } : undefined;
-  if (!row || row.market.status !== "VERIFIED")
-    return { ...launch, market: row?.market ?? { status: "UNAVAILABLE", reason: "retained launch refresh unavailable" },
-      ...(refreshedChronology ? { chronology: refreshedChronology } : {}) };
-  const assessment = assessPonsLaunch(launch.pairLabel, row.market);
-  return { ...launch, market: row.market, metadata: row.metadata, assessment, verdict: assessment.verdict,
-    handoffs: liveHandoffs(launch, row.market, assessment), ...(refreshedChronology ? { chronology: refreshedChronology } : {}) };
+  const h = header as Record<string, unknown> | null;
+  return launches.map((launch, index) => {
+    const row = research[index];
+    if (!h || h.number !== blockTag || typeof h.hash !== "string" || !/^0x[0-9a-f]{64}$/i.test(h.hash) ||
+        typeof h.timestamp !== "string" || !/^0x[0-9a-f]+$/i.test(h.timestamp))
+      return { ...launch, market: row?.market ?? { status: "UNAVAILABLE", reason: "retained launch refresh unavailable" } };
+    const currentTimestamp = Number(BigInt(h.timestamp));
+    const chronology = launch.chronology;
+    const refreshedChronology = chronology ? { ...chronology, currentBlock: headBlock, currentTimestamp,
+      currentBlockHash: h.hash, tokenAgeSeconds: chronology.launchTimestamp === null ? null : currentTimestamp - chronology.launchTimestamp } : undefined;
+    if (!row || row.market.status !== "VERIFIED")
+      return { ...launch, market: row?.market ?? { status: "UNAVAILABLE", reason: "retained launch refresh unavailable" },
+        ...(refreshedChronology ? { chronology: refreshedChronology } : {}) };
+    const assessment = assessPonsLaunch(launch.pairLabel, row.market);
+    return { ...launch, market: row.market, metadata: row.metadata, assessment, verdict: assessment.verdict,
+      handoffs: liveHandoffs(launch, row.market, assessment), ...(refreshedChronology ? { chronology: refreshedChronology } : {}) };
+  });
 }
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
@@ -187,12 +199,23 @@ function isRpcLog(value: unknown): value is RpcLog {
     typeof log.data === "string";
 }
 
-export async function fetchLiveSnapshot(rpc: RpcCaller, options: { blockWindow?: number } = {}): Promise<LiveSnapshot> {
-  const chainHex = await rpc("eth_chainId");
+export interface LiveDiscoveryCache {
+  head: number | null;
+  headHash: string | null;
+  window: number;
+  launches: RpcLog[];
+  graduations: RpcLog[];
+}
+
+export function createLiveDiscoveryCache(): LiveDiscoveryCache {
+  return { head: null, headHash: null, window: 0, launches: [], graduations: [] };
+}
+
+export async function fetchLiveSnapshot(rpc: RpcCaller, options: { blockWindow?: number; discoveryCache?: LiveDiscoveryCache } = {}): Promise<LiveSnapshot> {
+  const [chainHex, headHex] = await Promise.all([rpc("eth_chainId"), rpc("eth_blockNumber")]);
   if (typeof chainHex !== "string" || parseHexInteger(chainHex) !== ROBINHOOD_CHAIN_ID) {
     throw new Error("RPC is not Robinhood Chain mainnet (chain id 4663)");
   }
-  const headHex = await rpc("eth_blockNumber");
   if (typeof headHex !== "string") throw new Error("RPC returned an invalid head block");
   const headBlock = parseHexInteger(headHex);
   if (headBlock === null) throw new Error("RPC returned an invalid head block");
@@ -201,21 +224,33 @@ export async function fetchLiveSnapshot(rpc: RpcCaller, options: { blockWindow?:
     throw new Error("blockWindow must be an integer from 1 to 25000");
   }
   const fromBlock = Math.max(0, headBlock - requestedWindow + 1);
-  const rawLogs = await rpc("eth_getLogs", [{
-    address: PONS_FACTORY,
-    topics: [TOKEN_LAUNCHED_TOPIC],
-    fromBlock: `0x${fromBlock.toString(16)}`,
-    toBlock: headHex
-  }]);
-  if (!Array.isArray(rawLogs)) throw new Error("RPC returned invalid launch logs");
+  const cache = options.discoveryCache;
+  // Keep full deployer context, but fetch only new logs plus a reorg overlap after startup.
+  const priorHeader = cache?.head !== null && cache?.head !== undefined && cache.headHash && cache.window === requestedWindow && headBlock > cache.head
+    ? await readHeader(rpc, cache.head) : null;
+  const scanFrom = cache?.head !== null && cache?.head !== undefined && priorHeader && cache.headHash && priorHeader.hash.toLowerCase() === cache.headHash.toLowerCase() && cache.window === requestedWindow && headBlock > cache.head
+    ? Math.max(fromBlock, cache.head - 31) : fromBlock;
+  const getLogs = (topic: string) => rpc("eth_getLogs", [{ address: PONS_FACTORY, topics: [topic],
+    fromBlock: `0x${scanFrom.toString(16)}`, toBlock: headHex }]);
+  const [newLogs, newGraduations] = await Promise.all([getLogs(TOKEN_LAUNCHED_TOPIC), getLogs(POOL_GRADUATED_TOPIC)]);
+  const mergeLogs = (previous: RpcLog[], incoming: unknown[]): RpcLog[] => {
+    const retained = previous.filter(log => {
+      const block = parseHexInteger(log.blockNumber);
+      return block !== null && block >= fromBlock && block < scanFrom;
+    });
+    const merged = new Map<string, RpcLog>();
+    for (const log of [...retained, ...incoming.filter(isRpcLog)]) {
+      const block = parseHexInteger(log.blockNumber);
+      if (block !== null && block >= fromBlock && block <= headBlock && log.removed !== true && log.address.toLowerCase() === PONS_FACTORY)
+        merged.set(`${log.transactionHash.toLowerCase()}:${log.logIndex}`, log);
+    }
+    return [...merged.values()];
+  };
+  if (!Array.isArray(newLogs)) throw new Error("RPC returned invalid launch logs");
+  if (!Array.isArray(newGraduations)) throw new Error("RPC returned invalid graduation logs");
+  const rawLogs = mergeLogs(cache?.launches ?? [], newLogs);
   const discoveredAt = new Date().toISOString();
-  const rawGraduations = await rpc("eth_getLogs", [{
-    address: PONS_FACTORY,
-    topics: [POOL_GRADUATED_TOPIC],
-    fromBlock: `0x${fromBlock.toString(16)}`,
-    toBlock: headHex
-  }]);
-  if (!Array.isArray(rawGraduations)) throw new Error("RPC returned invalid graduation logs");
+  const rawGraduations = mergeLogs(cache?.graduations ?? [], newGraduations);
   const graduatedTokens = new Set(rawGraduations.filter(isRpcLog).flatMap((log) => {
     if (log.address.toLowerCase() !== PONS_FACTORY || log.topics[0]?.toLowerCase() !== POOL_GRADUATED_TOPIC || log.topics.length < 2) return [];
     const token = addressFromTopic(log.topics[1] ?? "");
@@ -252,6 +287,8 @@ export async function fetchLiveSnapshot(rpc: RpcCaller, options: { blockWindow?:
       }
     };
   });
+  if (cache) Object.assign(cache, { head: headBlock, headHash: chronology[0]?.currentBlockHash ?? null,
+    window: requestedWindow, launches: rawLogs, graduations: rawGraduations });
   return {
     chainId: ROBINHOOD_CHAIN_ID,
     headBlock,
