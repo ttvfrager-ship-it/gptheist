@@ -46,10 +46,12 @@
     "node": ">=18"
   },
   "devDependencies": {
+    "@types/fs-ext": "^2.0.3",
     "@types/node": "^18.19.0",
     "typescript": "^5.7.0"
   },
   "dependencies": {
+    "fs-ext": "^2.1.1",
     "viem": "^2.56.3"
   }
 }

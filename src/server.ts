@@ -117,6 +117,14 @@ function send(response: ServerResponse, status: number, type: string, body: stri
   response.end(body);
 }
 
+const activeServers = new Map<string, Server>();
+const shutdowns = new WeakMap<Server, () => Promise<void>>();
+export async function stopDeskServer(server: Server): Promise<void> {
+  const closed = new Promise<void>((accept, reject) => server.close(error => error ? reject(error) : accept()));
+  server.closeIdleConnections();
+  await Promise.all([closed, shutdowns.get(server)?.()]);
+}
+
 export function createDeskServer(options: DeskServerOptions = {}): Server {
   const rpc = options.rpc ?? createHttpRpcCaller(options.rpcUrl);
   const root = resolve(options.assetsRoot ?? DEFAULT_ASSETS);
@@ -144,12 +152,16 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
     }
     return pending;
   };
+  const paperKey = options.paperDirectory ? resolve(options.paperDirectory) : undefined;
+  if (paperKey && activeServers.has(paperKey)) return activeServers.get(paperKey)!;
   let paper: PaperService | undefined;
   let paperError: string | null = null;
-  const paperReady = options.paperDirectory ? PaperStore.open(options.paperDirectory).then(store => {
+  const paperReady = options.paperDirectory ? PaperStore.open(options.paperDirectory).then(async store => {
+    try {
     const quotes = new PaperQuoteService(rpc, store.read().config, options.paperUsdFetch);
     paper = new PaperService(store, snapshot, position => quotes.sell(position),
       (launch, sizeUsd) => quotes.buy(launch, sizeUsd), quotes, Date.now, rpc, { discoveryIntervalMs: options.paperDiscoveryIntervalMs, log: options.paperLog }); paper.start();
+    } catch (error) { await store.close(); paper = undefined; throw error; }
   }).catch((error: unknown) => {
     paperError = error instanceof Error ? error.message : "Paper storage unavailable";
     try { options.paperLog?.(`PAPER startup error: ${paperError}`); } catch { /* Logging must not change startup failure handling. */ }
@@ -289,7 +301,13 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
       send(response, 500, "text/plain; charset=utf-8", "Internal error\n");
     }
   });
-  server.once("close", () => { void paperReady.then(() => paper?.close()).catch(() => undefined); });
+  const cleanup = async (): Promise<void> => {
+    await paperReady; await paper?.close();
+    if (paperKey && activeServers.get(paperKey) === server) activeServers.delete(paperKey);
+  };
+  shutdowns.set(server, cleanup);
+  if (paperKey) activeServers.set(paperKey, server);
+  server.once("close", () => { void cleanup().catch(() => undefined); });
   return server;
 }
 
@@ -297,6 +315,7 @@ export async function startDeskServer(options: DeskServerOptions & { host?: stri
   const server = createDeskServer({ ...options, paperDirectory: options.paperDirectory ?? resolve(process.cwd(), "runs/paper") });
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 4173;
+  if (server.listening) return server;
   server.listen(port, host);
   await new Promise<void>((resolveReady, reject) => {
     server.once("listening", resolveReady);

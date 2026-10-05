@@ -23,6 +23,8 @@ export class PaperService {
   private lastMonitorAt: string | null = null;
   private monitorError: string | null = null;
   private stopped = false;
+  private started = false;
+  private closing: Promise<void> | undefined;
   private error: string | null = null;
   private lastSuccess: string | null = null;
   private lastCycleMs: number | null = null;
@@ -44,6 +46,8 @@ export class PaperService {
     }
   }
   start(): void {
+    if (this.started || this.stopped) return;
+    this.started = true;
     const config = this.store.read().config, policy = getPaperStrategy(config);
     this.report(`PAPER started: ${policy.version === 4 ? "SCALP" : "STRICT"} v${policy.version}; simulated trades; discovery every ${this.options.discoveryIntervalMs ?? 4000}ms; exit quotes every ${config.PAPER_QUOTE_REFRESH_MS}ms`);
     void this.tick();
@@ -214,5 +218,10 @@ export class PaperService {
       void this.monitor();
     }
   }
-  async close(): Promise<void> { this.stopped = true; clearTimeout(this.timer); clearTimeout(this.monitorTimer); await this.pending; await Promise.all(this.inFlight.values()); await this.store.close(); }
+  close(): Promise<void> {
+    return this.closing ??= (async () => {
+      this.stopped = true; clearTimeout(this.timer); clearTimeout(this.monitorTimer);
+      await this.pending; await Promise.all(this.inFlight.values()); await this.store.close();
+    })();
+  }
 }

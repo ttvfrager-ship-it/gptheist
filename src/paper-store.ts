@@ -1,7 +1,8 @@
+import fsExt from "fs-ext";
 import { unknownLaunchEvidence } from "./launch-evidence.js";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { open, rename, unlink } from "node:fs/promises";
+import { open, rename, type FileHandle } from "node:fs/promises";
 import { resolve } from "node:path";
 import { ensureSafeAuditDirectory } from "./simulation.js";
 import { PAPER_CONFIG, accountSummary, initialPaperState, quoteProblem, type PaperState } from "./paper.js";
@@ -58,20 +59,31 @@ async function readSafe(path: string): Promise<string> {
 function code(error: unknown): string | undefined { return error instanceof Error && "code" in error ? String(error.code) : undefined; }
 export class PaperStore {
   private tail: Promise<void> = Promise.resolve();
-  private constructor(readonly directory: string, private state: PaperState) {}
+  private closed = false;
+  private constructor(readonly directory: string, private state: PaperState, private readonly ownership: FileHandle) {}
   static async open(directory: string): Promise<PaperStore> {
     const root = await ensureSafeAuditDirectory(directory), lock = resolve(root, "writer.lock");
-    // Exclusive process ownership; stale locks from a terminated process are recoverable.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try { const h = await open(lock, "wx", 0o600); try { await h.writeFile(String(process.pid)); await h.sync(); } finally { await h.close(); } break; }
-      catch (error) {
-        if (code(error) !== "EEXIST" || attempt !== 0) throw error;
-        const pid = Number(await readSafe(lock));
-        if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Invalid paper lock; inspect writer.lock manually");
-        try { process.kill(pid, 0); throw new Error("Paper account already owned by a running process"); }
-        catch (probe) { if (code(probe) !== "ESRCH") throw probe; }
-        await unlink(lock);
+    // The inode stays in place forever: unlinking a locked inode permits a second writer.
+    // Kernel ownership expires on process death, independently of container PID reuse.
+    const ownership = await open(lock, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
+    try {
+      await new Promise<void>((accept, reject) => fsExt.flock(ownership.fd, "exnb", error => error ? reject(error) : accept()));
+      const legacy = (await ownership.readFile("utf8")).trim();
+      if (/^\d+$/.test(legacy)) {
+        // PID-only records cannot prove liveness across container namespaces.
+        // Migration requires an operator-established stop of the old deployment.
+        if (process.env.PAPER_LEGACY_OWNER_STOPPED !== "true")
+          throw new Error("Legacy PID-only paper ownership cannot be verified safely across containers. Stop the old runtime, then set PAPER_LEGACY_OWNER_STOPPED=true for the first upgrade startup.");
+      } else if (legacy && legacy !== "GPTHEIST_FLOCK_V1") {
+        throw new Error("Invalid paper lock; inspect writer.lock manually");
       }
+      await ownership.truncate(0);
+      await ownership.write("GPTHEIST_FLOCK_V1", 0, "utf8");
+      await ownership.sync();
+    } catch (error) {
+      await ownership.close();
+      if (["EAGAIN", "EWOULDBLOCK"].includes(code(error) ?? "")) throw new Error("Paper account already owned by a running process");
+      throw error;
     }
     try {
       let state: PaperState;
@@ -131,8 +143,8 @@ export class PaperStore {
         if (process.env[key] !== undefined) state.config[key] = Number(process.env[key]);
       }
       initialPaperState(Date.now(), state.config);
-      const store = new PaperStore(root, state); await store.write(state); return store;
-    } catch (error) { await unlink(lock); throw error; }
+      const store = new PaperStore(root, state, ownership); await store.write(state); return store;
+    } catch (error) { await ownership.close(); throw error; }
   }
   read(): PaperState { return structuredClone(this.state); }
   private async write(state: PaperState): Promise<void> {
@@ -154,6 +166,7 @@ export class PaperStore {
     const dir = await open(this.directory, "r"); try { await dir.sync(); } finally { await dir.close(); }
   }
   update(fn: (state: PaperState) => void | Promise<void>): Promise<void> {
+    if (this.closed) return Promise.reject(new Error("Paper store is closed"));
     const work = this.tail.then(async () => { const next = this.read(); await fn(next); await this.write(next); this.state = next; });
     this.tail = work.catch(() => undefined); return work;
   }
@@ -178,7 +191,7 @@ export class PaperStore {
       Object.assign(state, initialPaperState(Date.now(), config));
     });
   }
-  async close(): Promise<void> { await this.tail; await unlink(resolve(this.directory, "writer.lock")); }
+  async close(): Promise<void> { if (this.closed) return; this.closed = true; await this.tail; await this.ownership.close(); }
 }
 
 /** Preserve balances/history; old universal strategy settings do not drive new entries. */

@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AGENTS, EXECUTION_MODE, ensureSafeAuditDirectory, runSimulation, sanitizeTerminal, validateFixture, writeJsonlLog, type ReplayFixture, type SimulationResult } from "./simulation.js";
 import { PaperStore } from "./paper-store.js";
-import { startDeskServer } from "./server.js";
+import { startDeskServer, stopDeskServer } from "./server.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -88,11 +88,19 @@ async function main(args: string[]): Promise<void> {
     if (!Number.isFinite(discoveryIntervalMs) || discoveryIntervalMs < 1000) throw new Error("PAPER_DISCOVERY_INTERVAL_MS must be at least 1000");
     const server = await startDeskServer({ host, port, ...(rpcUrl ? { rpcUrl } : {}), paperDiscoveryIntervalMs: discoveryIntervalMs,
       paperLog: message => process.stdout.write(sanitizeTerminal(message) + "\n") });
-    for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => { server.close(); server.closeIdleConnections(); });
+    let finishShutdown!: () => void;
+    const shutdownComplete = new Promise<void>(accept => { finishShutdown = accept; });
+    let shuttingDown = false;
+    for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      void stopDeskServer(server).then(() => { process.exitCode = 0; })
+        .catch(error => { console.error(error); process.exitCode = 1; }).finally(finishShutdown);
+    });
     const address = server.address();
     const boundPort = typeof address === "object" && address !== null ? address.port : port;
     process.stdout.write(`GPTHEIST DESK — read-only Robinhood Chain watch\nhttp://${sanitizeTerminal(host)}:${boundPort}\nNo wallet. No signing. No live execution.\n`);
-    await new Promise<void>(() => undefined);
+    await shutdownComplete;
     return;
   }
   if (command === "doctor") {
@@ -111,7 +119,7 @@ async function main(args: string[]): Promise<void> {
       ["runtime dependencies allowlisted", async () => {
         const pkg = JSON.parse(await readFile(resolve(projectRoot, "package.json"), "utf8")) as { dependencies?: Record<string, string> };
         const dependencies = Object.keys(pkg.dependencies ?? {}).sort();
-        return dependencies.length === 1 && dependencies[0] === "viem";
+        return dependencies.length === 2 && dependencies[0] === "fs-ext" && dependencies[1] === "viem";
       }],
       ["execution boundary: paper-only", async () => EXECUTION_MODE === "paper-only"]
     ];
