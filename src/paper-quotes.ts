@@ -248,6 +248,7 @@ export async function readPaperQuote(
   if (order.side === "SELL") {
     let cache = launchHeaders.get(rpc);
     if (!cache) { cache = new Map(); launchHeaders.set(rpc, cache); }
+    if (cache.size >= 512 && !cache.has(launch.blockNumber)) cache.delete(cache.keys().next().value!);
     launchInfo = cache.get(launch.blockNumber);
     if (!launchInfo) { launchInfo = {}; cache.set(launch.blockNumber, launchInfo); }
     const info = launchInfo;

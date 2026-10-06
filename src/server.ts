@@ -227,6 +227,12 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
         send(response, 405, "application/json; charset=utf-8", JSON.stringify({ error: "method not allowed" }));
         return;
       }
+      if (path === "/api/paper/trades") {
+        await paperReady;
+        if (!paper) { send(response,503,"application/json; charset=utf-8",JSON.stringify({error:paperError??"Paper unavailable"})); return; }
+        const page=await paper.store.historicalTrades(requestUrl.searchParams.get("cursor")??undefined);
+        send(response,200,"application/json; charset=utf-8",JSON.stringify(page)); return;
+      }
       if (path === "/api/paper") {
         await paperReady;
         send(response, paper ? 200 : 503, "application/json; charset=utf-8", JSON.stringify(paper ? paper.view() : { mode: "PAPER", error: paperError ?? "Paper service not configured" }));
@@ -272,6 +278,8 @@ export function createDeskServer(options: DeskServerOptions = {}): Server {
             verified: Boolean((user.verification as { verified?: unknown } | undefined)?.verified),
             source: "FxTwitter public profile mirror"
           });
+          for (const [id,row] of socialCache) if (Date.now()-row.at > 300_000) socialCache.delete(id);
+          if (socialCache.size >= 256) socialCache.delete(socialCache.keys().next().value!);
           socialCache.set(key, { at: Date.now(), value });
           send(response, 200, "application/json; charset=utf-8", value);
         } catch (error: unknown) {

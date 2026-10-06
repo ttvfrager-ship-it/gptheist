@@ -93,12 +93,19 @@ export interface ClosedTrade extends Position {
 export interface CandidateDecision extends Eligibility { timestamp: string; candidate: Candidate; sizeUsd: number; gptheistVerdict: Candidate["decision"]; paperVerdict: Eligibility["outcome"]; plan?: PaperTradePlan }
 export interface EquitySnapshot { timestamp: string; equity: number; stalePositions: number }
 export interface PaperState {
+  archiveHead?: string;
+  archiveTradeHead?: string;
+  archivedDailyLoss?: { day: string; loss: number };
+  archivedRegimeTrades?: { exitedAt: string; pnlUsd: number; plan: Pick<PaperTradePlan, "strategyVersion"> }[];
+  archivedStrategyStats?: Record<string, { trades: number; wins: number; grossProfit: number; grossLoss: number }>;
+  archivedRealizedPnl?: number;
+  archivedPerformance?: ReturnType<typeof performance>;
   liquidityHistory?: Record<string, LiquidityObservation[]>;
   tractionHistory?: Record<string, TractionObservation[]>;
   tractionWatchlist?: Record<string, LiveLaunchDecision>;
   lastObservedHeadBlock: number | null;
   researchLedger?: Record<string, { firstObservedAt: string; firstObservedAtMs?: number; lastObservedAt: string; observations: number;
-    lastResult: string | null; lastOutcome?: string; traded: boolean; sourceEventId?: string;
+    lastResult: string | null; lastOutcome?: string; traded: boolean; archivedClosed?: boolean; sourceEventId?: string;
     sourceEventTimestampMs?: number | null; eventMode?: "LIVE" | "BACKFILL"; classificationReason?: string; deduplicateLogged?: boolean }>;
   schemaVersion: 2; mode: "PAPER"; createdAt: string; config: PaperConfig; cash: number;
   positions: Position[]; trades: ClosedTrade[]; decisions: CandidateDecision[];
@@ -160,7 +167,7 @@ export function quoteProblem(q: PaperQuote, now: number, maxAge: number, usdMaxA
 }
 export function dailyRealizedLoss(state: PaperState, now: number): number {
   const day = iso(now).slice(0, 10);
-  return state.trades.filter(t => t.exitedAt.slice(0, 10) === day).reduce((sum, t) => sum + Math.max(0, -t.pnlUsd), 0);
+  return state.trades.filter(t => t.exitedAt.slice(0, 10) === day).reduce((sum, t) => sum + Math.max(0, -t.pnlUsd), state.archivedDailyLoss?.day === day ? state.archivedDailyLoss.loss : 0);
 }
 export function paperLaunchRejection(c: Candidate, state: PaperState, now: number): string | null {
   if (c.currentBlock == null || c.launchTimestamp == null || c.currentTimestamp == null || c.tokenAgeSeconds == null ||
@@ -203,7 +210,7 @@ export function isPaperTradeEligible(candidate: Candidate, state: PaperState, si
   if (sizeUsd > q.liquidityUsd * state.config.MAX_REAL_LIQUIDITY_PERCENT / 100 + 1e-8) return reject("REAL_LIQUIDITY_CAP", "PAPER_REJECT", [`realLiquidityUsd=${q.liquidityUsd}; proposedUsd=${sizeUsd}; maxParticipationPercent=${state.config.MAX_REAL_LIQUIDITY_PERCENT}`]);
   if (q.costs.priceImpactPercent === null || q.costs.priceImpactPercent > state.config.MAX_ENTRY_IMPACT_PERCENT) return reject("PRICE_IMPACT_LIMIT");
   if (state.positions.some(p => p.tokenAddress.toLowerCase() === candidate.tokenAddress.toLowerCase())) return reject("DUPLICATE_POSITION");
-  if (state.trades.some(t => t.launchId === candidate.launchId)) return reject("LAUNCH_ALREADY_TRADED");
+  if (state.researchLedger?.[candidate.launchId]?.archivedClosed || state.trades.some(t => t.launchId === candidate.launchId)) return reject("LAUNCH_ALREADY_TRADED");
   if (state.positions.length >= state.config.MAX_OPEN_POSITIONS) return reject("MAX_OPEN_POSITIONS");
   if (dailyRealizedLoss(state, now) >= state.config.MAX_DAILY_LOSS_USD) return reject("DAILY_LOSS_LIMIT");
   if (sizeUsd + (q.costs.gasUsd ?? 0) > state.cash) return reject("INSUFFICIENT_PAPER_CASH");
@@ -245,7 +252,7 @@ export function completedWatch(handoffs: AgentHandoff[]): boolean {
 }
 export function positionValue(p: Position): number { return p.current.notionalUsd - (p.current.side === "SELL" ? p.current.costs.gasUsd ?? 0 : 0); }
 export function accountSummary(state: PaperState) {
-  const realizedPnl = state.trades.reduce((sum, t) => sum + t.pnlUsd, 0);
+  const realizedPnl = state.trades.reduce((sum, t) => sum + t.pnlUsd, state.archivedRealizedPnl ?? 0);
   const value = state.positions.reduce((sum, p) => sum + positionValue(p), 0);
   const unrealizedPnl = state.positions.reduce((sum, p) => sum + positionValue(p) - p.costBasisUsd, 0);
   const equity = state.cash + value;
@@ -257,20 +264,28 @@ export function accountSummary(state: PaperState) {
     startingBalance: state.config.STARTING_BALANCE_USD, availableCash: state.cash, equity, realizedPnl, unrealizedPnl,
     totalPnl: equity - state.config.STARTING_BALANCE_USD, totalReturnPercent: (equity / state.config.STARTING_BALANCE_USD - 1) * 100 };
 }
-export function performance(state: PaperState) {
-  const trades = state.trades, wins = trades.filter(t => t.pnlUsd > 0), losses = trades.filter(t => t.pnlUsd < 0);
-  const grossProfit = wins.reduce((s, t) => s + t.pnlUsd, 0), grossLoss = -losses.reduce((s, t) => s + t.pnlUsd, 0);
-  let peakEquity = state.config.STARTING_BALANCE_USD, maximumDrawdown = 0, maximumDrawdownUsd = 0;
-  for (const h of state.history) { peakEquity = Math.max(peakEquity, h.equity); maximumDrawdownUsd = Math.max(maximumDrawdownUsd, peakEquity - h.equity); maximumDrawdown = Math.max(maximumDrawdown, (peakEquity - h.equity) / peakEquity * 100); }
-  const fills = [...state.positions.map(p => p.entry), ...trades.flatMap(t => [t.entry, t.exit])];
-  const cost = (key: keyof Costs) => ({ knownUsd: fills.reduce((s, q) => s + (q.costs[key] ?? 0), 0), unknownFills: fills.filter(q => q.costs[key] === null).length });
-  return { totalTrades: trades.length, wins: wins.length, losses: losses.length, winRate: trades.length ? wins.length / trades.length * 100 : 0,
-    grossProfit, grossLoss, netPnl: grossProfit - grossLoss, averageWin: wins.length ? grossProfit / wins.length : null,
-    averageLoss: losses.length ? -grossLoss / losses.length : null, profitFactor: grossLoss ? grossProfit / grossLoss : null,
-    expectancy: trades.length ? (grossProfit - grossLoss) / trades.length : null, maximumDrawdown, maximumDrawdownUsd, peakEquity,
-    averageHoldingTime: trades.length ? trades.reduce((s, t) => s + Date.parse(t.exitedAt) - Date.parse(t.enteredAt), 0) / trades.length : null,
-    estimatedFees: cost("feesUsd"), estimatedSlippage: cost("slippageUsd"), estimatedGasCosts: cost("gasUsd") };
+export function performance(state: PaperState): { totalTrades: number; wins: number; losses: number; winRate: number; grossProfit: number; grossLoss: number; netPnl: number; averageWin: number | null; averageLoss: number | null; profitFactor: number | null; expectancy: number | null; maximumDrawdown: number; maximumDrawdownUsd: number; peakEquity: number; averageHoldingTime: number | null; estimatedFees: { knownUsd: number; unknownFills: number }; estimatedSlippage: { knownUsd: number; unknownFills: number }; estimatedGasCosts: { knownUsd: number; unknownFills: number } } {
+  const prior = state.archivedPerformance;
+  const trades = state.trades;
+  const wins = (prior?.wins ?? 0) + trades.filter(t => t.pnlUsd > 0).length;
+  const losses = (prior?.losses ?? 0) + trades.filter(t => t.pnlUsd < 0).length;
+  const totalTrades = (prior?.totalTrades ?? 0) + trades.length;
+  const grossProfit = trades.filter(t => t.pnlUsd > 0).reduce((s,t)=>s+t.pnlUsd, prior?.grossProfit ?? 0);
+  const grossLoss = trades.filter(t => t.pnlUsd < 0).reduce((s,t)=>s-t.pnlUsd, prior?.grossLoss ?? 0);
+  let peakEquity = prior?.peakEquity ?? state.config.STARTING_BALANCE_USD;
+  let maximumDrawdown = prior?.maximumDrawdown ?? 0, maximumDrawdownUsd = prior?.maximumDrawdownUsd ?? 0;
+  for (const h of state.history) { peakEquity = Math.max(peakEquity,h.equity); maximumDrawdownUsd = Math.max(maximumDrawdownUsd,peakEquity-h.equity); maximumDrawdown = Math.max(maximumDrawdown,(peakEquity-h.equity)/peakEquity*100); }
+  const fills = [...state.positions.map(p=>p.entry), ...trades.flatMap(t=>[t.entry,t.exit])];
+  const cost = (key: keyof Costs, old: { knownUsd: number; unknownFills: number } | undefined) => ({ knownUsd: fills.reduce((s,q)=>s+(q.costs[key]??0),old?.knownUsd??0), unknownFills: (old?.unknownFills??0)+fills.filter(q=>q.costs[key]===null).length });
+  const netPnl = grossProfit-grossLoss;
+  return { totalTrades,wins,losses,winRate: totalTrades ? wins/totalTrades*100 : 0,grossProfit,grossLoss,netPnl,
+    averageWin: wins ? grossProfit/wins : null, averageLoss: losses ? -grossLoss/losses : null,
+    profitFactor: grossLoss ? grossProfit/grossLoss : null,expectancy: totalTrades ? netPnl/totalTrades : null,
+    maximumDrawdown,maximumDrawdownUsd,peakEquity,
+    averageHoldingTime: totalTrades ? (trades.reduce((s,t)=>s+Date.parse(t.exitedAt)-Date.parse(t.enteredAt),0)+(prior?.averageHoldingTime??0)*(prior?.totalTrades??0))/totalTrades : null,
+    estimatedFees: cost("feesUsd",prior?.estimatedFees), estimatedSlippage: cost("slippageUsd",prior?.estimatedSlippage), estimatedGasCosts: cost("gasUsd",prior?.estimatedGasCosts) };
 }
+
 export function activity(state: PaperState, eventType: string, message: string, now: number, candidate?: Candidate, metadata: Record<string, unknown> = {}): void {
   state.events.push({ timestamp: iso(now), category: "PAPER", stage: "PAPER", tokenAddress: candidate?.tokenAddress ?? null,
     tokenSymbol: candidate?.symbol ?? null, eventType, message, metadata });
@@ -492,6 +507,7 @@ export function observeCandidateTraction(state: PaperState, candidate: Candidate
   }
   const cutoff = (candidate.currentTimestamp ?? Math.floor(clock()/1000)) - config.TRACTION_WINDOW_SECONDS;
   const observations = rows.filter(row => Date.parse(row.timestamp) / 1000 >= cutoff);
+  historyMap[key] = observations;
   const recent = observations.filter(row => row.verificationStatus === "VERIFIED");
   const first = recent[0], last = recent.at(-1);
   const enough = recent.length >= config.TRACTION_OBSERVATION_COUNT && !!first && !!last &&
@@ -565,6 +581,7 @@ export async function observeSnapshot(state: PaperState, snapshot: LiveSnapshot,
         eventMode: candidate.eventMode, sourceEventId: candidate.sourceEventId });
     for (const h of candidate.handoffs) state.events.push({ timestamp: h.timestamp, category: "RESEARCH", stage: h.agent,
       tokenAddress: launch.token, tokenSymbol: candidate.symbol, eventType: h.outcome, message: h.message, metadata: { launchId: candidate.launchId, block: snapshot.headBlock } });
+    if (observation.traded) continue;
     if (state.positions.some(p=>p.tokenAddress.toLowerCase()===candidate.tokenAddress.toLowerCase()) || state.trades.some(t=>t.launchId===candidate.launchId)) continue;
     if (candidate.decision === "WATCH" && candidate.evidenceComplete && quotes) {
       const age = clock() - Date.parse(snapshot.fetchedAt);

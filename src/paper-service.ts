@@ -1,3 +1,4 @@
+import { collectionCounts } from "./paper-retention.js";
 import { accountCapacity } from "./paper-policy.js";
 import { getPaperStrategy } from "./paper-strategy.js";
 import { researchMetrics } from "./paper-research.js";
@@ -14,6 +15,7 @@ export interface PaperServiceOptions {
 
 export class PaperService {
   readonly startedAt = Date.now();
+  private memoryTimer: ReturnType<typeof setInterval> | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private pending: Promise<void> | undefined;
   private monitorTimer: ReturnType<typeof setTimeout> | undefined;
@@ -38,19 +40,28 @@ export class PaperService {
     try { this.options.log?.(message); } catch { /* Logging must not interrupt account updates. */ }
   }
   private reportEvents(events: import("./paper.js").ActivityEvent[]): void {
+    const failures = new Map<string, number>();
     for (const event of events) {
-      if (event.category === "RESEARCH" || event.eventType === "PAPER_LAB_FRAME") continue;
+      if (event.eventType === "QUOTE_UNAVAILABLE") failures.set(event.message, (failures.get(event.message) ?? 0) + 1);
+      if (event.category === "RESEARCH" || !["PAPER_BUY", "SIMULATED_SELL", "OPEN_TRADE_LIMIT_UPDATED"].includes(event.eventType)) continue;
       const numbers = ["sizeUsd", "pnlUsd", "returnPercent"].filter(key => typeof event.metadata[key] === "number")
         .map(key => `${key}=${Number(event.metadata[key]).toFixed(2)}`).join(" ");
       this.report(`[${event.timestamp}] ${event.eventType} ${event.tokenSymbol ?? event.tokenAddress ?? ""} ${event.message}${numbers ? " " + numbers : ""}`);
     }
+    for (const [reason,count] of failures) this.report(`PAPER sell failures: ${reason} count=${count}`);
   }
   start(): void {
     if (this.started || this.stopped) return;
     this.started = true;
     const config = this.store.read().config, policy = getPaperStrategy(config);
     this.report(`PAPER started: ${policy.version === 4 ? "SCALP" : "STRICT"} v${policy.version}; simulated trades; discovery every ${this.options.discoveryIntervalMs ?? 4000}ms; exit quotes every ${config.PAPER_QUOTE_REFRESH_MS}ms`);
+    this.memoryTimer=setInterval(()=>this.reportMemory(),300_000);
+    this.memoryTimer.unref();
     void this.tick();
+  }
+  private reportMemory(): void {
+    const memory=process.memoryUsage();
+    this.report("MEMORY " + Object.entries(memory).map(([k,v])=>`${k}=${(v/1048576).toFixed(1)}MB`).join(" ") + " " + Object.entries(collectionCounts(this.store.read())).map(([k,v])=>`${k}=${v}`).join(" ") + ` timers=${Number(!!this.timer)+Number(!!this.monitorTimer)+Number(!!this.memoryTimer)} inFlight=${this.inFlight.size} retry=${this.retryAfter.size} sellTape=${this.sellTape.length}`);
   }
   async monitor(): Promise<void> {
     if (this.stopped) return;
@@ -140,9 +151,10 @@ export class PaperService {
             if (draft.tractionHistory) state.tractionHistory = draft.tractionHistory;
             if (draft.tractionWatchlist) state.tractionWatchlist = draft.tractionWatchlist;
             if (draft.researchLedger) {
+              const priorTraded=new Set(Object.entries(state.researchLedger??{}).filter(([,row])=>row.traded).map(([id])=>id));
               state.researchLedger = draft.researchLedger;
               const traded = new Set([...state.positions, ...state.trades].map(p => p.launchId));
-              for (const [id, row] of Object.entries(state.researchLedger)) row.traded = traded.has(id);
+              for (const [id, row] of Object.entries(state.researchLedger)) row.traded = traded.has(id) || priorTraded.has(id) || row.archivedClosed === true;
             }
             state.latestGate = draft.latestGate;
             state.events.push(...draft.events.filter(e => !["PAPER_BUY", "PAPER_ELIGIBLE"].includes(e.eventType)));
@@ -159,6 +171,8 @@ export class PaperService {
       } catch (error) { this.error = error instanceof Error ? error.message : "Paper persistence failed"; }
     })().finally(async () => {
       await monitoring;
+      const active = new Set(this.store.read().positions.map(p=>p.id));
+      for (const id of this.retryAfter.keys()) if (!active.has(id)) this.retryAfter.delete(id);
       this.lastCycleMs = Date.now() - cycleStartedAt;
       if (this.error) this.report("PAPER error: " + this.error);
       this.pending = undefined;
@@ -202,7 +216,7 @@ export class PaperService {
     return { entryDiagnostics, monitor: { lastCompletedAt: this.lastMonitorAt, running: this.inFlight.size > 0, error: this.monitorError }, quoteHealth: this.sources?.status() ?? null, execution: "SIMULATED", startedAt: new Date(this.startedAt).toISOString(),
       connection: !this.error && this.lastSuccess && Date.now() - Date.parse(this.lastSuccess) <= state.config.QUOTE_MAX_AGE_MS ? "LIVE" : "UNAVAILABLE",
       error: this.error, lastSuccess: this.lastSuccess, account: accountSummary(state), riskCapacity: accountCapacity(state), performance: performance(state), research: researchMetrics(state),
-      ...state, events: state.events.slice(-200), decisions: state.decisions.slice(-100), trades: state.trades.slice(-100) };
+      ...state, events: state.events.slice(-200), decisions: [...new Map(state.decisions.filter(d => state.tractionWatchlist?.[d.candidate.launchId]).map(d=>[d.candidate.launchId,d])).values()].slice(-100), recentRejections: state.decisions.filter(d=>d.outcome!=="PAPER_ELIGIBLE" && !state.tractionWatchlist?.[d.candidate.launchId]).slice(-25), trades: state.trades.slice(-100) };
   }
   setMaxOpenPositions(maxOpenPositions: number): Promise<void> { return this.store.setMaxOpenPositions(maxOpenPositions); }
   async resetAccount(startingBalanceUsd: number): Promise<void> {
@@ -220,8 +234,8 @@ export class PaperService {
   }
   close(): Promise<void> {
     return this.closing ??= (async () => {
-      this.stopped = true; clearTimeout(this.timer); clearTimeout(this.monitorTimer);
-      await this.pending; await Promise.all(this.inFlight.values()); await this.store.close();
+      this.stopped = true; clearTimeout(this.timer); clearTimeout(this.monitorTimer); clearInterval(this.memoryTimer);
+      await this.pending; await Promise.all(this.inFlight.values()); clearTimeout(this.timer); clearTimeout(this.monitorTimer); this.retryAfter.clear(); this.sellTape.length=0; await this.store.close();
     })();
   }
 }

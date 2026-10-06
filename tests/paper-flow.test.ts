@@ -255,7 +255,8 @@ test("cached snapshots do not repeat entry work or whole-account discovery write
     const before = store.read();
     await service.tick();
     assert.deepEqual(store.read(), before);
-    assert.equal(before.events.filter(e => e.eventType === "PAPER_LAB_FRAME").length, 1);
+    assert.equal(before.events.filter(e => e.eventType === "PAPER_LAB_FRAME").length, 0);
+    assert.ok(before.archiveHead, "Raw research frame is archived instead of retained");
     assert.equal(service.view().connection, "LIVE");
   } finally { await service.close(); }
 });

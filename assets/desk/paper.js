@@ -107,6 +107,7 @@ $("gas-model").textContent=`${(gas?.assumedGasUnits??200000).toLocaleString()} a
 $("paper-status").textContent=`PAPER QUOTES ${health?.status??"DEGRADED"} · ETH/USD ${usd?.status==="LIVE"?money(usd.ask):usd?.status??"UNAVAILABLE"} · ${health?.quoteSource??"AWAITING QUOTE"} · ${s.positions.length} OPEN · ${s.performance.totalTrades} CLOSED${s.error?` · RESEARCH UNAVAILABLE: ${s.error}`:""}${health?.lastAttempt?.reason?` · ${health.lastAttempt.reason}`:""}${s.positions.some(p=>p.markStatus!=="FRESH")?" · VALUATION INCLUDES LAST-KNOWN MARKS":""}`;
 if(s.entryDiagnostics){const d=s.entryDiagnostics;$("paper-status").textContent+=` · ${d.strategyMode??"STRICT"} V${d.strategyVersion??3} · ${d.liveCandidates} LIVE CANDIDATES · SCAN ${d.lastCycleMs===null?"WARMING UP":duration(d.lastCycleMs)}${d.blockers.length?` · ENTRY BLOCKERS: ${d.blockers.slice(0,3).map(b=>`${b.reason} (${b.count})`).join(", ")}`:""}`;}
 if(s.entryDiagnostics?.accountSizingBlocked)$("paper-status").textContent+=` · ACCOUNT SIZING BLOCKED: ${money(s.entryDiagnostics.allocationCapUsd)} allocation cap is below ${money(s.entryDiagnostics.minimumTradeUsd)} minimum trade`;
+$("recent-rejections").replaceChildren(...(s.recentRejections??[]).slice(-25).reverse().map(d=>node("p",`${d.candidate.symbol} · ${d.reason}`)));
 chart(s.history);facts("history-stats",[["STARTING BALANCE",money(a.startingBalance)],[s.positions.some(p=>p.markStatus!=="FRESH")?"LAST-KNOWN ACCOUNT VALUE":"CURRENT EQUITY",money(a.equity)],["PEAK EQUITY",money(p.peakEquity)],["MAX DRAWDOWN",pct(p.maximumDrawdown)]]);
 $("activity").replaceChildren(...s.events.slice().reverse().map(e=>{const item=node("li");item.append(node("time",new Date(e.timestamp).toLocaleTimeString()),node("b",e.stage),node("span",e.eventType),node("p",`${e.tokenSymbol?e.tokenSymbol+" / ":""}${e.message}`));return item;}));if(!s.events.length)$("activity").append(node("li","No activity recorded yet."));
 $("position-count").textContent=`${s.positions.length} / ${s.config.MAX_OPEN_POSITIONS}`;
@@ -150,3 +151,16 @@ setInterval(()=>{if(startedAt!==null)$("clock").textContent=duration(Date.now()-
 for(const link of document.querySelectorAll(".terminal-sidebar nav a"))link.addEventListener("click",()=>{for(const peer of document.querySelectorAll(".terminal-sidebar nav a"))peer.classList.toggle("selected",peer===link);});
 
 new ResizeObserver(()=>{if(lastState)chart(lastState.history);}).observe($("equity-chart"));
+
+let archiveCursor=null,archiveStarted=false;
+$("older-trades").addEventListener("click",async()=>{
+ const button=$("older-trades");button.disabled=true;
+ try {
+  const response=await fetch("/api/paper/trades"+(archiveStarted&&archiveCursor?"?cursor="+encodeURIComponent(archiveCursor):""));
+  const page=await response.json();if(!response.ok)throw new Error(page.error??"History unavailable");
+  archiveStarted=true;archiveCursor=page.next;
+  $("archived-trades").replaceChildren(node("h3","ARCHIVED PAPER TRADES"),...page.trades.slice().reverse().map(t=>node("p",`${new Date(t.exitedAt).toLocaleString()} · ${t.symbol} · ${money(t.pnlUsd)} · ${t.exitReason}`)));
+  button.textContent=page.next?"OLDER TRADES":"END OF HISTORY";
+ } catch(error) {$("archived-trades").textContent=error.message;}
+ finally {button.disabled=archiveStarted&&!archiveCursor;}
+});

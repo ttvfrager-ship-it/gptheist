@@ -242,7 +242,7 @@ test("malformed quote shape is rejected without throwing", () => {
 });
 test("invalid rejected quote can be persisted without NaN becoming a price", async () => {
   const directory = await mkdtemp(join(tmpdir(), "paper-invalid-"));
-  const store = await PaperStore.open(directory);
+  const store = await PaperStore.open(directory, () => now);
   await store.update(s => { enterPaper(s, candidate(quote(NaN)), 10, now); });
   assert.equal(store.read().decisions[0]?.candidate.quote.status, "NOT_PAPER_TRADABLE");
   assert.equal(store.read().positions.length, 0); await store.close();

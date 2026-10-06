@@ -20,18 +20,20 @@ export function researchMetrics(state: PaperState, now = Date.now()) {
   const unavailableOpen = open.filter(p=>p.markStatus!=="FRESH" || p.current.side!=="SELL" ||
     quoteProblem(p.current,now,state.config.QUOTE_MAX_AGE_MS,state.config.ETH_USD_MAX_AGE_MS));
   const openUnrealizedPnlUsd = unavailableOpen.length ? null : open.reduce((sum,p)=>sum+p.current.notionalUsd-(p.current.costs.gasUsd??0)-p.costBasisUsd,0);
-  const wins = cohort.filter(t => t.pnlUsd > 0).length;
-  const netPnlUsd = cohort.reduce((sum,t)=>sum+t.pnlUsd,0);
-  const grossLoss = -cohort.filter(t=>t.pnlUsd<0).reduce((sum,t)=>sum+t.pnlUsd,0);
-  const grossProfit = cohort.filter(t=>t.pnlUsd>0).reduce((sum,t)=>sum+t.pnlUsd,0);
-  const winRatePercent = cohort.length ? wins/cohort.length*100 : null;
+  const archived=state.archivedStrategyStats?.[String(strategy.version)];
+  const cohortCount=cohort.length+(archived?.trades??0);
+  const wins = cohort.filter(t => t.pnlUsd > 0).length+(archived?.wins??0);
+  const netPnlUsd = cohort.reduce((sum,t)=>sum+t.pnlUsd,0)+(archived?.grossProfit??0)-(archived?.grossLoss??0);
+  const grossLoss = -cohort.filter(t=>t.pnlUsd<0).reduce((sum,t)=>sum+t.pnlUsd,0)+(archived?.grossLoss??0);
+  const grossProfit = cohort.filter(t=>t.pnlUsd>0).reduce((sum,t)=>sum+t.pnlUsd,0)+(archived?.grossProfit??0);
+  const winRatePercent = cohortCount ? wins/cohortCount*100 : null;
   return {
     strategyValidation: { version: strategy.version, targetWinRatePercent: strategy.targetWinRatePercent,
-      minimumTrades: strategy.minimumValidationTrades, closedTrades: cohort.length, wins, winRatePercent, netPnlUsd,
+      minimumTrades: strategy.minimumValidationTrades, closedTrades: cohortCount, wins, winRatePercent, netPnlUsd,
       profitFactor: grossLoss > 0 ? grossProfit/grossLoss : null,
       openPositions: open.length, unavailableOpenPositions: unavailableOpen.length, openUnrealizedPnlUsd,
       netLiquidationPnlUsd: openUnrealizedPnlUsd === null ? null : netPnlUsd+openUnrealizedPnlUsd,
-      status: cohort.length < strategy.minimumValidationTrades ? "COLLECTING_EVIDENCE" :
+      status: cohortCount < strategy.minimumValidationTrades ? "COLLECTING_EVIDENCE" :
         unavailableOpen.length ? "UNVERIFIED_OPEN_EXPOSURE" :
         winRatePercent! >= strategy.targetWinRatePercent && netPnlUsd > 0 && netPnlUsd+openUnrealizedPnlUsd! > 0 ? "TARGET_MET" : "BELOW_TARGET" },
     knownTaxesUsd: fills.reduce((sum, q) => sum + (q.evidence ? (Number(q.evidence.creatorTaxWei) + Number(q.evidence.snipeTaxWei)) / 1e18 * q.evidence.ethUsd : 0), 0),
@@ -42,6 +44,7 @@ export function researchMetrics(state: PaperState, now = Date.now()) {
     // Active-window counts explicitly labeled; the archive retains lifetime opportunities.
     retainedOpportunities: new Set(state.decisions.map(d => d.candidate.launchId)).size,
     retainedRejectedOpportunities: new Set(state.decisions.filter(d => d.outcome !== "PAPER_ELIGIBLE").map(d => d.candidate.launchId)).size,
+    distributionCoverage: "Recent resident closed trades; full evidence available in persisted history",
     medianReturnPercent: returns.length ? (returns[Math.floor((returns.length - 1) / 2)]! + returns[Math.floor(returns.length / 2)]!) / 2 : null,
     bestTradePercent: returns.at(-1) ?? null, worstTradePercent: returns[0] ?? null,
     meanMfePercent: mean(trades.flatMap(t => t.management.mfePercent === undefined ? [] : [t.management.mfePercent])),

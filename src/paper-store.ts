@@ -1,3 +1,4 @@
+import { retainPaperState } from "./paper-retention.js";
 import fsExt from "fs-ext";
 import { unknownLaunchEvidence } from "./launch-evidence.js";
 import { randomUUID } from "node:crypto";
@@ -60,8 +61,8 @@ function code(error: unknown): string | undefined { return error instanceof Erro
 export class PaperStore {
   private tail: Promise<void> = Promise.resolve();
   private closed = false;
-  private constructor(readonly directory: string, private state: PaperState, private readonly ownership: FileHandle) {}
-  static async open(directory: string): Promise<PaperStore> {
+  private constructor(readonly directory: string, private state: PaperState, private readonly ownership: FileHandle, private readonly retentionClock: () => number) {}
+  static async open(directory: string, retentionClock: () => number = Date.now): Promise<PaperStore> {
     const root = await ensureSafeAuditDirectory(directory), lock = resolve(root, "writer.lock");
     // The inode stays in place forever: unlinking a locked inode permits a second writer.
     // Kernel ownership expires on process death, independently of container PID reuse.
@@ -143,21 +144,32 @@ export class PaperStore {
         if (process.env[key] !== undefined) state.config[key] = Number(process.env[key]);
       }
       initialPaperState(Date.now(), state.config);
-      const store = new PaperStore(root, state, ownership); await store.write(state); return store;
+      const store = new PaperStore(root, state, ownership, retentionClock); await store.write(state); return store;
     } catch (error) { await ownership.close(); throw error; }
+  }
+  async historicalTrades(cursor?: string): Promise<{ trades: PaperState["trades"]; next: string | null }> {
+    const name = cursor ?? this.state.archiveTradeHead;
+    if (!name) return { trades: [], next: null };
+    if (!/^audit-archive-\d+-[0-9a-f-]+\.json$/.test(name)) throw new Error("Invalid history cursor");
+    const record = JSON.parse(await readSafe(resolve(this.directory,name))) as { trades?: PaperState["trades"]; previousTrades?: string | null };
+    return { trades: record.trades ?? [], next: record.previousTrades ?? null };
   }
   read(): PaperState { return structuredClone(this.state); }
   private async write(state: PaperState): Promise<void> {
     // Keep the active account bounded without discarding audit evidence or trade history.
-    const oldEvents = Math.max(0, state.events.length - 2000), oldDecisions = Math.max(0, state.decisions.length - 500);
-    if (oldEvents || oldDecisions) {
-      const archive = await open(resolve(this.directory, `audit-archive-${Date.now()}-${randomUUID()}.json`), "wx", 0o600);
-      try {
-        await archive.writeFile(JSON.stringify({ events: state.events.slice(0, oldEvents), decisions: state.decisions.slice(0, oldDecisions) }));
-        await archive.sync();
-      } finally { await archive.close(); }
-      state.events = state.events.slice(oldEvents); state.decisions = state.decisions.slice(oldDecisions);
-    }
+    const archived = retainPaperState(state, this.retentionClock());
+    const saveArchive = async (record: Record<string, unknown>, tradePage = false) => {
+      const name = `audit-archive-${Date.now()}-${randomUUID()}.json`;
+      const file = await open(resolve(this.directory,name),"wx",0o600);
+      try { await file.writeFile(JSON.stringify({ ...record, previous: state.archiveHead ?? null, previousTrades: state.archiveTradeHead ?? null })); await file.sync(); }
+      finally { await file.close(); }
+      state.archiveHead=name;
+      if (tradePage) state.archiveTradeHead=name;
+    };
+    const { trades, ...audit } = archived;
+    if (Object.values(audit).some(v => Array.isArray(v) ? v.length : Object.keys(v).length)) await saveArchive(audit);
+    // Fixed-size pages also bound historical reads after migrating a large legacy account.
+    for (let start=0;start<trades.length;start+=100) await saveArchive({trades:trades.slice(start,start+100)},true);
     validatePaperState(state);
     const temp = resolve(this.directory, `state-${process.pid}.tmp`);
     const h = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);

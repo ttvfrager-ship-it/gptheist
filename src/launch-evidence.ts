@@ -14,7 +14,7 @@ export interface LaunchEvidence {
     creatorTaxChangeBps?: number; snipeTaxChangeBps?: number; lastVerifiedActivityTime: null;
     explanation: string };
 }
-interface Observation { eventMode: "LIVE" | "BACKFILL"; first: number; firstObservedAtMs: number; classificationReason: string; market: PonsMarketState; block: number; timestamp: number | null }
+interface Observation { launchBlock: number; eventMode: "LIVE" | "BACKFILL"; first: number; firstObservedAtMs: number; classificationReason: string; market: PonsMarketState; block: number; timestamp: number | null }
 interface Session { head: number; observations: Map<string, Observation>; headers: Map<number, NonNullable<Awaited<ReturnType<typeof readHeader>>>> }
 const sessions = new WeakMap<RpcCaller, Session>();
 export const RECENT_TRACTION_WINDOW_SECONDS = 300;
@@ -76,7 +76,7 @@ export async function readHeader(rpc: RpcCaller, block: number): Promise<{ times
       "INITIAL_SCAN_HAS_NO_PRIOR_CHRONOLOGY_BOUNDARY" : launch.blockNumber <= previous.head ? "EVENT_NOT_AFTER_PREVIOUS_HEAD" : "EVENT_AFTER_PREVIOUS_HEAD");
     const firstObservedAtMs = old?.firstObservedAtMs ?? discoveredAtMs;
     const eventOccurredAtMs = valid ? header.timestampMs : null;
-    session.observations.set(launch.token, { eventMode, first: old?.first ?? head, firstObservedAtMs, classificationReason,
+    session.observations.set(launch.token, { launchBlock: launch.blockNumber, eventMode, first: old?.first ?? head, firstObservedAtMs, classificationReason,
       market: structuredClone(market), block: head, timestamp: current?.timestamp ?? null });
     return { launchBlock: launch.blockNumber, launchTimestamp: valid ? header.timestamp : null,
       sourceEventId: `${launch.transactionHash}:${launch.logIndex}`, eventOccurredAtMs, firstObservedAtMs,
@@ -87,7 +87,7 @@ export async function readHeader(rpc: RpcCaller, block: number): Promise<{ times
       launchBlockHash: valid ? header.hash : null, currentBlockHash: current?.hash ?? null, recentTraction };
   });
   session.head = Math.max(session.head, head);
-  for (const [token, observation] of session.observations) if (observation.block < head - 25_000) session.observations.delete(token);
+  for (const [token, observation] of session.observations) if (observation.launchBlock < head - 25_000) session.observations.delete(token);
   for (const block of session.headers.keys()) if (block < head - 25_000) session.headers.delete(block);
   sessions.set(rpc, session);
   return evidence;

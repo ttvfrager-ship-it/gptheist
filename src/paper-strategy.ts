@@ -78,7 +78,7 @@ export function entryQuality(candidate: Candidate, quote?: PaperQuote, now = Dat
 
 export function entryRegimeRejection(state: PaperState, now: number): string | null {
   const policy = getPaperStrategy(state.config);
-  const recent = state.trades.filter(t=>t.plan.strategyVersion===policy.version && Date.parse(t.exitedAt)<=now)
+  const recent = [...(state.archivedRegimeTrades ?? []), ...state.trades].filter(t=>t.plan.strategyVersion===policy.version && Date.parse(t.exitedAt)<=now)
     .sort((a,b)=>Date.parse(a.exitedAt)-Date.parse(b.exitedAt)).slice(-policy.lossStreakLimit);
   if (recent.length===policy.lossStreakLimit && recent.every(t=>t.pnlUsd<0) &&
       now-Date.parse(recent.at(-1)!.exitedAt)<policy.lossStreakPauseMs) return "STRATEGY_LOSS_STREAK_PAUSE";
